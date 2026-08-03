@@ -13,7 +13,7 @@ import { summitDistanceFor } from './formulas.js';
 
 const SISYPHUS_SRC = '/sisyphus.png';
 const BOULDER_SRC = '/boulder.png';
-const BACKGROUND_SRC = '/background.png';
+const BACKGROUND_SRC = '/background.png?v=4';
 const HILL_TILE_SRC = '/hill-tile.png';
 
 const ART_W = 1536;
@@ -67,7 +67,7 @@ const EXTRA_BASE_TILES = 2;
 const BG_PARALLAX = 0.18;
 const BG_PARALLAX_X = 0.12;
 
-const UNDERFILL = '#1a1028';
+const UNDERFILL = '#241830';
 
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
@@ -380,9 +380,9 @@ export function createRenderer(canvas) {
   }
 
   /**
-   * Underworld panorama — fill viewport height (no letterbox), tile horizontally.
-   * Smoothed upscale only for this layer so the short source art doesn't look
-   * like giant mushy blocks; hill/actors stay nearest-neighbor elsewhere.
+   * Distant painted backdrop (high-res). Cover the viewport height with
+   * smoothed scaling — keeps atmosphere clean while sprites stay nearest-neighbor.
+   * Horizontal parallax shifts within the image when it's wide enough; otherwise tiles.
    */
   function drawTiledBackground(cam) {
     if (!imageReady(background)) return;
@@ -392,20 +392,24 @@ export function createRenderer(canvas) {
     const imgH = background.naturalHeight || ART_H;
     if (imgW < 2 || imgH < 2) return;
 
-    const tileH = h;
-    const tileW = imgW * (tileH / imgH);
+    const scale = h / imgH;
+    const drawW = imgW * scale;
+    const drawH = h;
 
     const scrollX = cam.worldXOffset * BG_PARALLAX_X;
-    const offsetX = ((scrollX % tileW) + tileW) % tileW;
-    // Pin to top — height already fills the viewport (avoids letterbox from Y parallax).
-    const y = 0;
 
     ctx.imageSmoothingEnabled = true;
     if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
 
-    const startX = -offsetX;
-    for (let x = startX - tileW; x < w + tileW; x += tileW) {
-      ctx.drawImage(background, x, y, tileW, tileH);
+    if (drawW >= w) {
+      const maxShift = drawW - w;
+      const shift = ((scrollX % (maxShift + 1)) + (maxShift + 1)) % (maxShift + 1);
+      ctx.drawImage(background, -shift, 0, drawW, drawH);
+    } else {
+      const offsetX = ((scrollX % drawW) + drawW) % drawW;
+      for (let x = -offsetX - drawW; x < w + drawW; x += drawW) {
+        ctx.drawImage(background, x, 0, drawW, drawH);
+      }
     }
 
     ctx.imageSmoothingEnabled = false;
@@ -435,6 +439,7 @@ export function createRenderer(canvas) {
 
     const margin = m.tile * 1.5;
     ctx.imageSmoothingEnabled = false;
+    ctx.filter = 'brightness(1.18)';
 
     // Negative indices = extra tiles before the start (downslope lead-in).
     for (let i = -m.extraBase; i < m.n; i++) {
@@ -446,6 +451,7 @@ export function createRenderer(canvas) {
       if (sy + m.tile < -margin || sy > h + margin) continue;
       ctx.drawImage(src, sx, sy, m.tile, m.tile);
     }
+    ctx.filter = 'none';
   }
 
   function draw(state, dt = 1 / 60) {
@@ -469,6 +475,10 @@ export function createRenderer(canvas) {
     ctx.fillRect(0, 0, w, h);
 
     drawTiledBackground(cam);
+
+    // Knock the painted BG back so dark sprites don't melt into it.
+    ctx.fillStyle = 'rgba(6, 4, 12, 0.4)';
+    ctx.fillRect(0, 0, w, h);
 
     drawTiledHill(cam);
 
@@ -494,19 +504,6 @@ export function createRenderer(canvas) {
       ctx.fillText('SUMMIT', summit.x - 14, summit.y - 40);
     }
 
-    ctx.save();
-    ctx.translate(actors.shadowX, actors.shadowY);
-    ctx.rotate(actors.groundAngle);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, actors.boulderR * 0.95, actors.boulderR * 0.28, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
-    ctx.beginPath();
-    ctx.ellipse(actors.boulderR * 1.15, 0, actors.sisyDraw * 0.28, actors.sisyDraw * 0.08, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-
     drawBoulder(ctx, boulder, actors.bx, actors.by, state.run.boulderRotation, pulse, actors.boulderDraw);
     drawSisyphus(ctx, sisyphus, actors.sx, actors.sy, pulse, actors.sisyDraw, actors.groundAngle);
 
@@ -515,7 +512,7 @@ export function createRenderer(canvas) {
 
     const vig = ctx.createRadialGradient(w * 0.4, h * 0.55, h * 0.2, w * 0.5, h * 0.5, h * 0.9);
     vig.addColorStop(0, 'rgba(0,0,0,0)');
-    vig.addColorStop(1, 'rgba(8,6,14,0.4)');
+    vig.addColorStop(1, 'rgba(8,6,14,0.55)');
     ctx.fillStyle = vig;
     ctx.fillRect(0, 0, w, h);
   }
@@ -633,6 +630,7 @@ function drawBoulder(ctx, img, x, y, rotation, pulse, drawSize = 180) {
   ctx.translate(x, y);
   ctx.rotate(rotation);
   ctx.imageSmoothingEnabled = false;
+  ctx.filter = 'brightness(1.2)';
 
   const src = spriteSource(img);
   if (imageReady(img) || img._keyed) {
@@ -656,6 +654,7 @@ function drawSisyphus(ctx, img, centerX, centerY, pulse, drawSize = 160, groundA
   ctx.rotate(groundAngle);
   ctx.scale(stretch, squash);
   ctx.imageSmoothingEnabled = false;
+  ctx.filter = 'brightness(1.22)';
 
   const src = spriteSource(img);
   if (imageReady(img) || img._keyed) {
