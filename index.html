@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sisyphus Incremental</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Press+Start+2P&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <section id="stage" aria-label="Mountain scene">
+        <canvas id="game-canvas" width="960" height="640"></canvas>
+
+        <div id="hud">
+          <div class="hud-top">
+            <div class="hud-top-left">
+              <div class="icon-rail" role="toolbar" aria-label="Meta">
+                <button
+                  type="button"
+                  id="btn-settings"
+                  class="icon-btn icon-btn--art"
+                  title="Settings"
+                  aria-label="Settings"
+                >
+                  <img
+                    class="pixel-icon-art"
+                    src="/icon-settings.png?v=2"
+                    width="96"
+                    height="96"
+                    alt=""
+                    draggable="false"
+                  />
+                </button>
+                <button
+                  type="button"
+                  id="btn-stats"
+                  class="icon-btn icon-btn--art"
+                  title="Stats"
+                  aria-label="Stats"
+                >
+                  <img
+                    class="pixel-icon-art"
+                    src="/icon-stats.png"
+                    width="96"
+                    height="96"
+                    alt=""
+                    draggable="false"
+                  />
+                </button>
+              </div>
+              <div id="hud-stats" class="hud-stats" aria-live="polite"></div>
+            </div>
+
+            <div id="hud-center" class="hud-center">
+              <div class="hud-meter-block">
+                <div class="hud-meter-head">
+                  <span class="hud-label">Distance</span>
+                  <span class="hud-value" id="hud-distance">0 / 10K m</span>
+                </div>
+                <div class="meter" aria-hidden="true">
+                  <div class="meter-fill distance" id="hud-distance-bar"></div>
+                </div>
+              </div>
+              <div class="hud-meter-block">
+                <div class="hud-meter-head">
+                  <span class="hud-label">Momentum <span id="hud-momentum-pct">0%</span></span>
+                  <span class="hud-sub" id="hud-momentum-status">Idle</span>
+                </div>
+                <div class="meter momentum-meter" aria-hidden="true">
+                  <div class="meter-fill momentum" id="hud-momentum-bar"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="hud-currency" class="hud-currency">
+              <div class="hud-currency-item">
+                <span class="hud-label">Defiance</span>
+                <span class="hud-value accent" id="hud-defiance">0</span>
+              </div>
+              <div class="hud-currency-item">
+                <span class="hud-label">Spite</span>
+                <span class="hud-value spite" id="hud-spite">0</span>
+              </div>
+            </div>
+          </div>
+
+          <aside id="shop-dock" class="shop-dock" aria-label="Upgrades">
+            <div class="shop-dock-head">
+              <div class="shop-tabs" role="tablist">
+                <button
+                  type="button"
+                  class="shop-tab active"
+                  data-shop="defiance"
+                  role="tab"
+                  aria-selected="true"
+                >
+                  Defiance
+                </button>
+                <button
+                  type="button"
+                  class="shop-tab"
+                  data-shop="spite"
+                  role="tab"
+                  aria-selected="false"
+                >
+                  Spite
+                </button>
+              </div>
+              <p id="shop-blurb" class="shop-blurb">Resets on summit</p>
+            </div>
+            <div id="shop-defiance" class="shop-panel active" role="tabpanel"></div>
+            <div id="shop-spite" class="shop-panel" role="tabpanel" hidden></div>
+          </aside>
+        </div>
+
+        <div id="meta-overlay" class="meta-overlay" hidden>
+          <button type="button" class="meta-backdrop" id="meta-backdrop" aria-label="Close"></button>
+          <div class="meta-panel" role="dialog" aria-modal="true">
+            <div class="meta-panel-head">
+              <h2 id="meta-title" class="meta-title">Stats</h2>
+              <button type="button" id="meta-close" class="meta-close" aria-label="Close">X</button>
+            </div>
+            <div id="panel-stats" class="meta-body"></div>
+            <div id="panel-settings" class="meta-body" hidden></div>
+          </div>
+        </div>
+
+        <div id="debug-bar" class="debug-bar">
+          <span class="debug-label">DEV</span>
+          <button type="button" id="debug-restart">Restart run</button>
+          <button type="button" id="debug-hard-reset">Hard reset</button>
+          <button type="button" id="debug-skip-100">+1000m</button>
+          <button type="button" id="debug-summit">Jump to summit</button>
+        </div>
+
+        <div id="summit-overlay" class="overlay" hidden>
+          <div class="overlay-card">
+            <p class="overlay-eyebrow">Corporate Performance Review</p>
+            <h2 id="summit-title">Summit Reached</h2>
+            <p id="summit-quote" class="overlay-quote"></p>
+            <p id="summit-reward" class="overlay-reward"></p>
+            <button type="button" id="summit-continue" class="push-btn">
+              Accept Review &amp; Descend
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
