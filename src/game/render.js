@@ -13,9 +13,6 @@ import {
   summitDistanceFor,
   SUMMIT_DISTANCES,
   CRACK_HIT_FRAC,
-  visualMpsCapped,
-  VISUAL_MPS_ACTIVE_MAX,
-  VISUAL_MPS_PASSIVE_MAX,
   displayMeters,
 } from './formulas.js';
 
@@ -36,11 +33,15 @@ const SISY_WALK_SRCS = [
   '/sisyphuswalking/12frame/frame_11_delay-0.15s.png',
 ];
 const SISY_WALK_FRAME_DT = 0.42;
-/** m/s that maps to 1× frame timing — so 3.5 m/s plays at 2×. */
-const SISY_WALK_REF_MPS = 1.75;
-/** Clamp animation pace — matches visual m/s caps. */
-const SISY_WALK_PACE_MIN = 0.4;
-const SISY_WALK_PACE_MAX = VISUAL_MPS_ACTIVE_MAX / SISY_WALK_REF_MPS;
+/**
+ * Camera m/s that maps to 1× walk-cycle timing.
+ * Higher = fewer steps per meter of hill (feet stop outrunning the ground).
+ */
+const SISY_WALK_REF_MPS = 4.2;
+/** Fastest walk multiplier — keep frames readable on big shoves. */
+const SISY_WALK_PACE_MAX = 6;
+/** Fraction of measured pace taken instantly when climb starts (1 = full snap). */
+const FIRST_SHOVE_PACE_CATCHUP = 0.9;
 const BOULDER_SRC = '/boulder.png';
 /** Native size of roll frames / boulder PNG (pixels). */
 const BOULDER_NATIVE = 128;
@@ -847,7 +848,7 @@ export function createRenderer(canvas) {
         camSmoothY = targetOY;
         camInitialized = true;
       } else {
-        const lerp = 0.1;
+        const lerp = 0.07;
         camSmoothX += (targetOX - camSmoothX) * lerp;
         camSmoothY += (targetOY - camSmoothY) * lerp;
       }
@@ -1101,73 +1102,49 @@ export function createRenderer(canvas) {
     const hermesLv = (state.run.upgrades && state.run.upgrades.hermesSandals) || 0;
     updateHermesSandals(dt, actors, hermesLv);
 
-    // Struggle-walk: keep stepping whenever the body is actually sliding
-    // (visualDistance easing) or you're actively shoving — no frozen slide.
-    const distNow = state.run.distance || 0;
-    const slack = Math.max(0, state.run.visualSlack || 0);
-    const visualTarget = Math.max(0, distNow - slack);
-    const visualNow = state.run.visualDistance ?? visualTarget;
-    const sliding = visualNow < visualTarget - 0.02;
-    const pushMpsRaw = Math.max(0, state.run.activePushSpeed || 0);
-    const activelyPushing = pushMpsRaw > 0.05;
-    const shouldWalk = sliding || activelyPushing;
-
-    // Pace: use smoothed visualSpeedCap (eases 5 ↔ 10 m/s).
-    const visualMpsRaw =
-      sliding && dt > 0 ? Math.max(0, (visualTarget - visualNow) * 7) : 0;
-    const cap = state.run.visualSpeedCap ?? VISUAL_MPS_PASSIVE_MAX;
-    const pushMps = visualMpsCapped(pushMpsRaw, cap);
-    const visualMps = visualMpsCapped(visualMpsRaw, cap);
-    const paceMps = Math.max(pushMps, visualMps);
-    const walkPaceTarget =
-      paceMps > 0.05
-        ? Math.max(
-            SISY_WALK_PACE_MIN,
-            Math.min(SISY_WALK_PACE_MAX, paceMps / SISY_WALK_REF_MPS)
-          )
-        : SISY_WALK_PACE_MIN;
+    // Struggle-walk: pace follows the camera’s real m/s (lastVisualMps), not
+    // activePushSpeed — that gameplay rate runs ahead of the eased hill scroll.
+    const climbMps = Math.max(0, state.run.lastVisualMps || 0);
+    const climbing = climbMps > 0.02;
+    const shouldWalk = climbing;
+    // Exact camera→stride map — no minimum pace (that made feet spin on crawls).
+    const walkPaceTarget = climbing
+      ? Math.min(SISY_WALK_PACE_MAX, climbMps / SISY_WALK_REF_MPS)
+      : 0;
 
     const prevPace = walkPaceSmooth;
-    if (activelyPushing && !walkWasActive) {
-      // First shove: plant the cycle, but ease pace in (no snap to active cap).
+    if (climbing && !walkWasActive) {
+      // Climb just started: plant the cycle near the measured camera pace.
       walkCooldown = 0;
-      walkPaceSmooth += (walkPaceTarget - walkPaceSmooth) * Math.min(1, dt * 4);
+      walkPaceSmooth = Math.max(walkPaceSmooth, walkPaceTarget * FIRST_SHOVE_PACE_CATCHUP);
     } else if (walkPaceTarget >= walkPaceSmooth) {
-      // Speeding up — gradual ramp toward active ceiling.
-      walkPaceSmooth += (walkPaceTarget - walkPaceSmooth) * Math.min(1, dt * 3.2);
-    } else if (sliding) {
-      // Catch-up / easing down toward passive — slower than the old snap.
-      walkPaceSmooth += (walkPaceTarget - walkPaceSmooth) * Math.min(1, dt * 2.4);
+      walkPaceSmooth += (walkPaceTarget - walkPaceSmooth) * Math.min(1, dt * 8);
+    } else if (climbing) {
+      walkPaceSmooth += (walkPaceTarget - walkPaceSmooth) * Math.min(1, dt * 6);
     } else {
-      // Fully stopping — ease so he doesn’t stutter-stop.
-      walkPaceSmooth += (walkPaceTarget - walkPaceSmooth) * Math.min(1, dt * 3);
+      walkPaceSmooth += (0 - walkPaceSmooth) * Math.min(1, dt * 5);
     }
-    walkWasActive = activelyPushing;
-    const walkPace = Math.max(SISY_WALK_PACE_MIN, walkPaceSmooth);
+    walkWasActive = climbing;
+    const walkPace = Math.max(0, walkPaceSmooth);
 
-    // Boulder: idle = fixed loop; active eases toward twice that speed at full push.
+    // Boulder rolls off the same pace as the walk cycle, so the rock never
+    // spins faster than he is stepping.
+    const paceForAnim = Math.max(0.04, walkPace);
     if (boulderFrameDebug == null && shouldWalk) {
       const rollDt = dt * animSpeedMult;
-      if (activelyPushing) {
-        const u = Math.min(1, walkPace / SISY_WALK_PACE_MAX);
-        const loopSec =
-          BOULDER_PASSIVE_LOOP_SEC +
-          (BOULDER_ACTIVE_LOOP_SEC - BOULDER_PASSIVE_LOOP_SEC) * u;
-        boulderRollPhase += rollDt / loopSec;
-      } else {
-        boulderRollPhase += rollDt / BOULDER_PASSIVE_LOOP_SEC;
-      }
+      const walkCycleSec = (sisyWalk.length * SISY_WALK_FRAME_DT) / paceForAnim;
+      boulderRollPhase += (rollDt * BOULDER_TURNS_PER_WALK_CYCLE) / walkCycleSec;
     }
 
     // If pace rose mid-stride, shorten the remaining frame wait.
     if (walkCooldown > 0 && walkPace > prevPace && prevPace > 0.01) {
-      walkCooldown *= prevPace / walkPace;
+      walkCooldown *= prevPace / paceForAnim;
     }
 
     if (walkCooldown > 0) walkCooldown -= dt * animSpeedMult;
     if (walkFrameDebug == null && shouldWalk && walkCooldown <= 0) {
       walkFrame = (walkFrame + 1) % sisyWalk.length;
-      walkCooldown = SISY_WALK_FRAME_DT / walkPace;
+      walkCooldown = SISY_WALK_FRAME_DT / paceForAnim;
     }
 
     const displayWalkFrame =
@@ -1198,7 +1175,8 @@ export function createRenderer(canvas) {
       lastShoePlantFrame = -1;
     }
     if (shouldWalk) {
-      emitClimbGrit(actors, cam, walkPace, activelyPushing, dt);
+      const pushingHard = (state.run.activePushSpeed || 0) > 0.05;
+      emitClimbGrit(actors, cam, walkPace, pushingHard, dt);
       emitBoulderRollDust(actors, cam, walkPace, dt);
       emitSpeedLines(actors, cam, walkPace, dt);
     } else {
@@ -1664,10 +1642,8 @@ function litSpriteSource(img, amount) {
   return c;
 }
 
-/** Full boulder roll duration when not clicking. */
-const BOULDER_PASSIVE_LOOP_SEC = 3;
-/** Full boulder roll duration at max active push (2× idle). */
-const BOULDER_ACTIVE_LOOP_SEC = BOULDER_PASSIVE_LOOP_SEC / 2;
+/** Boulder revolutions per full walk cycle — keeps roll tied to stride length. */
+const BOULDER_TURNS_PER_WALK_CYCLE = 0.55;
 /** Last frame hold vs a normal frame (1 = equal). */
 const BOULDER_ROLL_LAST_FRAME_WEIGHT = 1;
 

@@ -124,6 +124,7 @@ export function createUI(state, hooks) {
     momentumBar: document.getElementById('hud-momentum-bar'),
     momentumStatus: document.getElementById('hud-momentum-status'),
     hudStats: document.getElementById('hud-stats'),
+    shopDock: document.querySelector('.shop-dock'),
     shopDefiance: document.getElementById('shop-defiance'),
     shopSpite: document.getElementById('shop-spite'),
     shopBlurb: document.getElementById('shop-blurb'),
@@ -275,6 +276,7 @@ export function createUI(state, hooks) {
   buildSettingsPanel();
   bindShopTabs();
   bindMeta();
+  bindResponsiveShopScale();
 
   els.summitContinue.addEventListener('click', () => hooks.onSummitContinue());
   els.btnPrometheus?.addEventListener('click', () => hooks.onCastPrometheus?.());
@@ -283,6 +285,39 @@ export function createUI(state, hooks) {
   els.shopDefiance?.addEventListener('scroll', hideShopTooltip, { passive: true });
   els.shopSpite?.addEventListener('scroll', hideShopTooltip, { passive: true });
   window.addEventListener('blur', hideShopTooltip);
+
+  function bindResponsiveShopScale() {
+    let frame = 0;
+
+    const update = () => {
+      frame = 0;
+      if (!els.shopDock || !els.hudStats) return;
+
+      // Measure at full size, then continuously scale to fit between the
+      // top-right stats and the bottom edge of the viewport.
+      els.shopDock.style.zoom = '1';
+      const statsRect = els.hudStats.getBoundingClientRect();
+      const dockRect = els.shopDock.getBoundingClientRect();
+      const overlapsHorizontally =
+        dockRect.right > statsRect.left && dockRect.left < statsRect.right;
+      const availableHeight = dockRect.bottom - statsRect.bottom - 12;
+      const fitScale = availableHeight / Math.max(1, dockRect.height);
+      const scale = overlapsHorizontally
+        ? Math.max(0.8, Math.min(1, fitScale))
+        : 1;
+
+      els.shopDock.style.zoom = String(scale);
+    };
+
+    const schedule = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    };
+
+    window.addEventListener('resize', schedule);
+    document.fonts?.ready.then(schedule);
+    schedule();
+  }
 
   function ensureTooltip() {
     if (tipEl) return tipEl;

@@ -20,9 +20,10 @@ import {
   hecateIntervalFor,
   nextCrackInterval,
   randomCrackOffset,
-  visualMpsCapped,
   blendVisualSpeedCap,
   VISUAL_MPS_PASSIVE_MAX,
+  VISUAL_FOLLOW_RATE,
+  MAX_VISUAL_HILL_FRAC_PER_SEC,
   DISPLAY_METER_SCALE,
 } from './game/formulas.js';
 import {
@@ -329,7 +330,8 @@ function checkSummit() {
   if (state.run.distance < summitDist || state.ui.summitPending) return;
 
   state.run.distance = summitDist;
-  state.run.visualDistance = summitDist;
+  // Release banked Device meters but let easeVisuals roll the rock up the last
+  // stretch — snapping it here is what teleported it to the top.
   state.run.visualSlack = 0;
   state.run.visualSpeedCap = VISUAL_MPS_PASSIVE_MAX;
   const nextSummit = state.meta.summits + 1;
@@ -492,42 +494,46 @@ function tick(dt) {
   checkSummit();
 }
 
-/** Ease camera path + boulder roll — smoothed ceiling between 5 passive / 10 active. */
+/**
+ * Ease the camera toward earned meters (minus Device slack).
+ * Soft exponential follow — no hard m/s cap, so the rock can’t fall arbitrarily
+ * far behind and teleport at the summit. Walk/roll still use visualSpeedCap.
+ */
 function easeVisuals(dt) {
   if (dt <= 0) return;
-  const pushMps = Math.max(0, state.run.activePushSpeed || 0);
   const sincePush =
     performance.now() / 1000 - (state.run.lastPushTime || 0);
-  // Cap follows input, not the long activePushSpeed tail — otherwise walk/camera
-  // stay at the active ceiling for seconds after you stop clicking.
+  // Cap follows input, not the long activePushSpeed tail — otherwise walk
+  // stays at the active ceiling for seconds after you stop clicking.
   const wantActiveCap = holding || sincePush < 0.1;
   state.run.visualSpeedCap = blendVisualSpeedCap(
     state.run.visualSpeedCap,
     wantActiveCap,
     dt
   );
-  const cap = state.run.visualSpeedCap;
 
+  const summitDist = summitDistanceFor(state.meta.summits);
   const slack = Math.max(0, state.run.visualSlack || 0);
-  // Chase real distance minus Device slack — banked Device meters stay off-camera.
   const visualTarget = Math.max(0, state.run.distance - slack);
   const prevVisual = state.run.visualDistance;
   const gap = visualTarget - prevVisual;
+  let visualDelta = 0;
   if (gap > 0) {
-    const gapMps = gap * 7;
-    const realMps = wantActiveCap ? Math.max(gapMps, pushMps) : gapMps;
-    const cappedMps = visualMpsCapped(realMps, cap);
-    state.run.visualDistance = Math.min(
-      visualTarget,
-      prevVisual + cappedMps * dt
-    );
+    // Soft follow, then cap how much of the *hill* we may traverse this frame
+    // so late-game click gains don't read as teleports.
+    const follow = 1 - Math.exp(-VISUAL_FOLLOW_RATE * dt);
+    const maxDelta =
+      summitDist * MAX_VISUAL_HILL_FRAC_PER_SEC * dt * (wantActiveCap ? 1.25 : 1);
+    visualDelta = Math.min(gap * follow, maxDelta);
+    state.run.visualDistance = prevVisual + visualDelta;
+  } else if (gap < 0) {
+    // Slack increased (Device) — camera may step back to the allowed path.
+    state.run.visualDistance = visualTarget;
   }
+  state.run.lastVisualMps = dt > 0 ? visualDelta / dt : 0;
 
-  // Rolling-without-slip: spin tracks how far the camera actually moved this frame
-  // so it eases down with the visual cap instead of dying when clicks stop.
-  const visualDelta = Math.max(0, state.run.visualDistance - prevVisual);
+  // Rolling-without-slip: spin tracks how far the camera actually moved.
   if (visualDelta > 0) {
-    const summitDist = summitDistanceFor(state.meta.summits);
     const progress = state.run.visualDistance / Math.max(1, summitDist);
     state.run.boulderRotation += renderer.rollRadiansForDistance(
       visualDelta,

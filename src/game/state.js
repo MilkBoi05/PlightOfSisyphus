@@ -28,14 +28,16 @@ export function createInitialState() {
       momentumIdleTimer: 0, // seconds since last click
       boulderRotation: 0, // radians (displayed; fed from spinQueue)
       spinQueue: 0, // pending roll radians to ease in
-      visualDistance: 0, // eased along path for camera/actors
+      visualDistance: 0, // camera path — eases toward distance − Device slack
       /**
        * Meters that count for gameplay but the camera should not chase
        * (e.g. Daedalus Device banks progress without a rocket slide).
        */
       visualSlack: 0,
-      /** Smoothed on-screen m/s ceiling (eases between passive/active max). */
+      /** Smoothed walk/roll m/s ceiling (eases between passive/active max). */
       visualSpeedCap: 5,
+      /** Last frame’s camera climb rate (m/s) for walk/roll pacing. */
+      lastVisualMps: 0,
       pushPulse: 0, // visual squash/stretch timer
       peakActiveSpeed: 0, // legacy; unused
       activePushSpeed: 0, // current active m/s (Hecate / stats readout)
@@ -84,6 +86,8 @@ export function loadState() {
     };
     // Visual fields aren't saved — start caught up with real distance.
     run.visualDistance = run.distance;
+    run.visualSlack = Math.max(0, Number(run.visualSlack) || 0);
+    run.lastVisualMps = 0;
     run.spinQueue = 0;
     // Ephemeral crack minigame — never restore mid-spot from save.
     run.crackSpot = null;
@@ -144,6 +148,7 @@ export function resetRunProgress(state) {
   state.run.visualDistance = 0;
   state.run.visualSlack = 0;
   state.run.visualSpeedCap = 5;
+  state.run.lastVisualMps = 0;
   state.run.pushPulse = 0;
   state.run.peakActiveSpeed = 0;
   state.run.activePushSpeed = 0;

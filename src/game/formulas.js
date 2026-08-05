@@ -71,6 +71,14 @@ export const PASSIVE_DISTANCE_MULT = 0.4;
  */
 export const VISUAL_MPS_ACTIVE_MAX = 10;
 export const VISUAL_MPS_PASSIVE_MAX = 5;
+/**
+ * Camera follow toward earned meters. Exponential softens click jolts.
+ * Paired with MAX_VISUAL_HILL_FRAC_PER_SEC so big Might/Traction shoves
+ * can't leap a huge slice of the mountain in one frame.
+ */
+export const VISUAL_FOLLOW_RATE = 3.2;
+/** Hard ceiling on camera progress along the hill (fraction of summit / sec). */
+export const MAX_VISUAL_HILL_FRAC_PER_SEC = 0.28;
 /** How fast the visual ceiling eases up toward active (higher = snappier). */
 export const VISUAL_CAP_BLEND_UP = 2.2;
 /** How fast the visual ceiling eases down toward passive. */
