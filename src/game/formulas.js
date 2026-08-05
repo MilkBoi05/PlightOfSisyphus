@@ -7,11 +7,31 @@
  * Exact numbers are prototype-tuned (GDD §11 open decisions).
  */
 
-export const SUMMIT_DISTANCES = [10_000, 15_000, 25_000, 50_000, 100_000];
+export const SUMMIT_DISTANCES = [1_000, 10_000, 50_000, 250_000, 1_000_000];
 /** First-summit length (also default / fallback). */
 export const SUMMIT_DISTANCE = SUMMIT_DISTANCES[0];
+
+/**
+ * Cosmetics only — HUD / labels show meters × this.
+ * Does not touch sim, softcaps, or Spite. Tune after early-summit playtest.
+ */
+export const DISPLAY_METER_SCALE = 0.1;
+
+/** Display-only meter/speed value (sim stays on true meters). */
+export function displayMeters(n) {
+  return (Number.isFinite(n) ? n : 0) * DISPLAY_METER_SCALE;
+}
+
+/**
+ * Throughput mult per summit band — tuned so a decked full-momentum board
+ * clears near: ~5–10m / 30m / 1h / 2h / 3h.
+ * Applied to active + softcapped passive (+ skills that grant meters).
+ */
+export const SUMMIT_PACE_MULTS = [1, 1.35, 2.1, 4.2, 8.5];
+
 /**
  * Hades kicks you further down each return.
+ * Early climb is short; later walls lean on Spite + idle.
  * `summitsCompleted` = meta.summits (0 before first clear).
  */
 export function summitDistanceFor(summitsCompleted) {
@@ -22,19 +42,62 @@ export function summitDistanceFor(summitsCompleted) {
   return SUMMIT_DISTANCES[idx];
 }
 
-/** Active click distance scalar — tuned for a tougher ~1h+ first summit. */
-export const CLICK_DISTANCE_MULT = 0.26;
-/** Passive distance scalar (idle still viable, just slower). */
-export const PASSIVE_DISTANCE_MULT = 0.7;
+/** Pace multiplier for the current mountain length. */
+export function summitPaceMult(summitDistance) {
+  const d = Math.max(1, summitDistance || SUMMIT_DISTANCE);
+  let idx = 0;
+  for (let i = 0; i < SUMMIT_DISTANCES.length; i++) {
+    if (d + 0.5 >= SUMMIT_DISTANCES[i]) idx = i;
+  }
+  return SUMMIT_PACE_MULTS[Math.min(idx, SUMMIT_PACE_MULTS.length - 1)];
+}
 
-export const BASE_MOMENTUM_BOOST = 0.1; // +10% at full bar → 1.10x
+/** Baseline Defiance granted per meter before Blood Tithe. */
+export const DEFIANCE_BASE_PER_METER = 1.0;
+/** Flat Defiance/m added per Blood Tithe level (then × Ledger / skill). */
+export const BLOOD_TITHE_PER_LEVEL = 0.209;
+/** Grudge Ledger multiplicative Profit per level. */
+export const GRUDGE_LEDGER_PER_LEVEL = 0.5225;
+/** Active click distance scalar — Might × Traction seed → meters. */
+export const CLICK_DISTANCE_MULT = 0.304;
+/** Global distance gain scale (clicks, idle, skills). 0.85 = 15% slower climb. */
+export const DISTANCE_GAIN_MULT = 0.85;
+/** Passive distance scalar (idle still viable, just slower than active). */
+export const PASSIVE_DISTANCE_MULT = 0.4;
+
+/**
+ * Hard caps for on-screen climb feel (HUD m/s stays uncapped).
+ * Active = clicking / hold; passive = idle catch-up (Shades / Hermes).
+ */
+export const VISUAL_MPS_ACTIVE_MAX = 10;
+export const VISUAL_MPS_PASSIVE_MAX = 5;
+/** How fast the visual ceiling eases up toward active (higher = snappier). */
+export const VISUAL_CAP_BLEND_UP = 2.2;
+/** How fast the visual ceiling eases down toward passive. */
+export const VISUAL_CAP_BLEND_DOWN = 2.8;
+
+/** Clamp real m/s to a ceiling (use smoothed run.visualSpeedCap). */
+export function visualMpsCapped(realMps, cap = VISUAL_MPS_ACTIVE_MAX) {
+  return Math.min(Math.max(0, realMps), Math.max(0, cap));
+}
+
+/** Ease the shared visual ceiling between passive and active max. */
+export function blendVisualSpeedCap(currentCap, wantActive, dt) {
+  const target = wantActive ? VISUAL_MPS_ACTIVE_MAX : VISUAL_MPS_PASSIVE_MAX;
+  let cap = Number.isFinite(currentCap) ? currentCap : VISUAL_MPS_PASSIVE_MAX;
+  const rate = target > cap ? VISUAL_CAP_BLEND_UP : VISUAL_CAP_BLEND_DOWN;
+  cap += (target - cap) * (1 - Math.exp(-rate * Math.max(0, dt)));
+  // Snap when essentially there.
+  if (Math.abs(target - cap) < 0.02) return target;
+  return cap;
+}
+
+export const BASE_MOMENTUM_BOOST = 0.095; // ~+9.5% at full bar
 export const BASE_DECAY_DELAY = 1.0; // seconds before drain
 export const BASE_MOMENTUM_BUILD = 1 / 30; // per click toward 1.0 (30 clicks)
 export const BASE_MOMENTUM_DECAY = 0.4; // per second after delay (~2.5s full→empty)
 export const VICTORY_SUMMIT = 5;
 export const HECATE_INTERVAL = 10; // seconds between auto orbs
-/** Hermes: fraction of *current* active m/s converted to passive, per level. */
-export const HERMES_CONVERT_PER_LEVEL = 0.08;
 /** How fast current push speed fades after you stop clicking. */
 export const ACTIVE_SPEED_DECAY = 1.6;
 /** Base seconds between auto-pushes while holding (before Relentless Tempo). */
@@ -42,8 +105,55 @@ export const HOLD_CLICK_BASE_INTERVAL = 1.0;
 /** Seconds shaved off hold interval per Relentless Tempo level. */
 export const HOLD_CLICK_INTERVAL_PER_LEVEL = 0.12;
 export const HOLD_CLICK_MIN_INTERVAL = 0.28;
-/** Shades: baseline passive m/s seed per level (before Traction / passives). */
-export const SHADES_RATE_PER_LEVEL = 1.8;
+/**
+ * m/s added by the k-th rank of a stepped idle upgrade (1-indexed).
+ * Pattern: +0.3, +0.3, +0.4, +0.4, +0.5, +0.5, …
+ */
+export function idleRankIncrement(k) {
+  const i = Math.max(1, k | 0);
+  return 0.3 + 0.1 * Math.floor((i - 1) / 2);
+}
+
+/**
+ * Cumulative stepped idle m/s from effective upgrade levels.
+ * Lv1=0.3, Lv2=0.6, Lv3=1.0, Lv4=1.4, Lv5=1.9, …
+ */
+export function idleRankRate(level) {
+  const n = Math.max(0, Number(level) || 0);
+  const full = Math.floor(n);
+  const frac = n - full;
+  let total = 0;
+  for (let k = 1; k <= full; k++) total += idleRankIncrement(k);
+  if (frac > 0) total += idleRankIncrement(full + 1) * frac;
+  return total;
+}
+
+/** Shades labor: Defiance/sec per Colony seed (× profit mult). */
+export const SHADES_LABOR_PER_COLONY = 1.6;
+/** Hermes rate at 0 Momentum (escorts the living climb). */
+export const HERMES_MOMENTUM_FLOOR = 0.32;
+
+/** Prometheus Fire — active skill tuning (level ≥ 1 unlocks cast). */
+export function prometheusSkill(level) {
+  const lv = Math.max(0, Number(level) || 0);
+  if (lv <= 0) return null;
+  return {
+    cooldown: Math.max(12, (26 - lv * 2.0) * 1.5),
+    duration: 2.8 + lv * 0.35,
+    pushMult: 1.4 + lv * 0.12,
+  };
+}
+
+/** Daedalus Device — active skill tuning. */
+export function daedalusSkill(level) {
+  const lv = Math.max(0, Number(level) || 0);
+  if (lv <= 0) return null;
+  return {
+    cooldown: Math.max(18, (30 - lv * 1.6) * 1.5),
+    /** Multiplier on (Might + Grip) × Traction for the single shove. */
+    shoveMult: 0.95 + lv * 0.22,
+  };
+}
 
 /** Run upgrade definitions (reset on summit). `lane`: active push vs idle. */
 export const RUN_UPGRADES = {
@@ -53,8 +163,8 @@ export const RUN_UPGRADES = {
     stat: 'Might',
     lane: 'active',
     desc: 'Raw push power. More Defiance & Distance seed per click.',
-    baseCost: 15,
-    costMult: 1.95,
+    baseCost: 12,
+    costMult: 1.55,
   },
   spikedSandals: {
     id: 'spikedSandals',
@@ -62,17 +172,17 @@ export const RUN_UPGRADES = {
     stat: 'Traction',
     lane: 'active',
     desc: 'Converts Might into meters more efficiently.',
-    baseCost: 90,
-    costMult: 1.95,
+    baseCost: 55,
+    costMult: 1.58,
   },
   chalkedGrip: {
     id: 'chalkedGrip',
     name: 'Chalked Grip',
     stat: 'Grip Capacity',
     lane: 'active',
-    desc: 'Raises the soft ceiling so late-mountain push converts better.',
-    baseCost: 120,
-    costMult: 2.0,
+    desc: 'Raises Grip so altitude pressure wastes less of each shove as you climb.',
+    baseCost: 70,
+    costMult: 1.6,
   },
   steadyRhythm: {
     id: 'steadyRhythm',
@@ -80,35 +190,44 @@ export const RUN_UPGRADES = {
     stat: 'Momentum',
     lane: 'active',
     desc: 'Raises the max Momentum output boost.',
-    baseCost: 140,
-    costMult: 2.05,
+    baseCost: 80,
+    costMult: 1.62,
+  },
+  bloodTithe: {
+    id: 'bloodTithe',
+    name: 'Blood Tithe',
+    stat: 'Defiance / m',
+    lane: 'active',
+    desc: 'Raises base Defiance per meter. Multiplied by Grudge Ledger.',
+    baseCost: 14,
+    costMult: 1.55,
   },
   grudgeLedger: {
     id: 'grudgeLedger',
     name: 'Grudge Ledger',
     stat: 'Profit Multiplier',
     lane: 'active',
-    desc: 'Each meter of progress pays more Defiance.',
-    baseCost: 22,
-    costMult: 2.0,
+    desc: 'Multiplies all Defiance from meters (and Tithe). Stacks with Path of Profit.',
+    baseCost: 16,
+    costMult: 1.58,
   },
   shades: {
     id: 'shades',
     name: 'Shades',
     stat: 'Colony Throughput',
     lane: 'passive',
-    desc: 'Damned souls shoulder the rock — baseline passive Distance (m/s) & Defiance.',
-    baseCost: 28,
-    costMult: 1.95,
+    desc: 'Damned souls shoulder the rock — flat base m/s that steps up each rank (0.03 → 0.06 → 0.10 → 0.14 → 0.19…), softened by altitude pressure, plus Defiance labor.',
+    baseCost: 20,
+    costMult: 1.55,
   },
   hermesSandals: {
     id: 'hermesSandals',
-    name: 'Winged Hermes Sandals',
+    name: 'Winged Sandals',
     stat: 'Idle Velocity',
     lane: 'passive',
-    desc: 'Converts a % of your current Active Push Speed into passive background velocity (fades when you stop clicking).',
-    baseCost: 130,
-    costMult: 2.0,
+    desc: 'Hermes escorts your climb — same stepped m/s curve as Shades (0.03 → 0.06 → 0.10…), scaled by Momentum and softened by altitude pressure.',
+    baseCost: 75,
+    costMult: 1.6,
   },
   hecateOrbs: {
     id: 'hecateOrbs',
@@ -116,8 +235,8 @@ export const RUN_UPGRADES = {
     stat: 'Idle Bursts',
     lane: 'passive',
     desc: 'Every 10s Hecate lobs an anti-gravity orb at the boulder — a modest passive speed spike.',
-    baseCost: 180,
-    costMult: 2.15,
+    baseCost: 100,
+    costMult: 1.65,
   },
   relentlessTempo: {
     id: 'relentlessTempo',
@@ -125,85 +244,458 @@ export const RUN_UPGRADES = {
     stat: 'Hold Push Rate',
     lane: 'active',
     desc: 'Speeds up auto-pushes while you hold click / Space. Requires Sustained Strain.',
-    baseCost: 110,
-    costMult: 2.05,
-    /** Skill gate: Path of Cadence node 2 (Sustained Strain). */
-    requiresSkill: { branch: 'momentum', minLevel: 2 },
+    baseCost: 65,
+    costMult: 1.6,
+    /** Skill gate: Sustained Strain (hold-to-push). */
+    requiresSkill: { branch: 'sustainedStrain', minLevel: 1 },
+  },
+  prometheus: {
+    id: 'prometheus',
+    name: 'Prometheus Fire',
+    stat: 'Active Skill',
+    lane: 'skills',
+    desc: 'Press Q — stolen fire amplifies your pushes for a few seconds. Expensive unlock; long cooldown. Levels: stronger buff, shorter cooldown.',
+    baseCost: 5000,
+    costMult: 1.75,
+  },
+  daedalus: {
+    id: 'daedalus',
+    name: "Daedalus' Device",
+    stat: 'Active Skill',
+    lane: 'skills',
+    desc: 'Press F — modest Distance shove + Defiance equal to 5× your current Def/s. Expensive unlock; long cooldown. Levels: stronger shove, shorter cooldown.',
+    baseCost: 7500,
+    costMult: 1.75,
   },
 };
 
 /**
- * Permanent skill tree — 6 branches × 3 nodes.
- * Nodes unlock in order within a branch. Costs are Spite.
+ * Permanent skill tree — Spite meta.
+ * 18 UI nodes / 53 ranks. Branches may list `requires` (all must be met).
  */
 export const SKILL_TREE = {
   might: {
     id: 'might',
-    name: 'Path of Muscle',
+    name: 'Knuckle Dust',
     stat: 'Might',
     nodes: [
-      { name: 'Knuckle Dust', desc: '+12% Might', cost: 3, effect: { might: 0.12 } },
-      { name: 'Shoulder Iron', desc: '+18% Might', cost: 8, effect: { might: 0.18 } },
-      { name: 'Titan Strain', desc: '+25% Might', cost: 18, effect: { might: 0.25 } },
+      { name: 'Knuckle Dust', desc: '+12% Might', cost: 6, effect: { might: 0.12 } },
+      { name: 'Shoulder Iron', desc: '+18% Might', cost: 16, effect: { might: 0.18 } },
+      { name: 'Titan Strain', desc: '+25% Might', cost: 36, effect: { might: 0.25 } },
+      { name: 'Boulder Lunge', desc: '+22% Might', cost: 80, effect: { might: 0.22 } },
+      { name: 'Atlas Debt', desc: '+30% Might', cost: 170, effect: { might: 0.3 } },
     ],
   },
   traction: {
     id: 'traction',
-    name: 'Path of Footing',
+    name: 'Iron Sole',
     stat: 'Traction',
     nodes: [
-      { name: 'Toehold', desc: '+10% Traction', cost: 3, effect: { traction: 0.1 } },
-      { name: 'Switchback Step', desc: '+15% Traction', cost: 8, effect: { traction: 0.15 } },
-      { name: 'Summit Stride', desc: '+22% Traction', cost: 18, effect: { traction: 0.22 } },
-    ],
-  },
-  colony: {
-    id: 'colony',
-    name: 'Path of the Damned',
-    stat: 'Colony Throughput',
-    nodes: [
-      { name: 'Whisper Choir', desc: '+15% Colony', cost: 4, effect: { colony: 0.15 } },
-      { name: 'Chain Gang', desc: '+25% Colony', cost: 10, effect: { colony: 0.25 } },
-      { name: 'Underworld Union', desc: '+35% Colony', cost: 22, effect: { colony: 0.35 } },
+      { name: 'Toehold', desc: '+10% Traction', cost: 6, effect: { traction: 0.1 } },
+      { name: 'Switchback Step', desc: '+15% Traction', cost: 16, effect: { traction: 0.15 } },
+      { name: 'Summit Stride', desc: '+22% Traction', cost: 36, effect: { traction: 0.22 } },
+      { name: 'Switchback Mastery', desc: '+18% Traction', cost: 80, effect: { traction: 0.18 } },
+      { name: 'No Slip Clause', desc: '+25% Traction', cost: 160, effect: { traction: 0.25 } },
     ],
   },
   grip: {
     id: 'grip',
-    name: 'Path of Hold',
+    name: 'Tight Squeeze',
     stat: 'Grip Capacity',
     nodes: [
-      { name: 'Palm Chalk', desc: '+15% Grip', cost: 3, effect: { grip: 0.15 } },
-      { name: 'Iron Fingers', desc: '+20% Grip', cost: 9, effect: { grip: 0.2 } },
-      { name: 'Unslipping', desc: '+30% Grip', cost: 20, effect: { grip: 0.3 } },
+      { name: 'Palm Chalk', desc: '+15% Grip', cost: 6, effect: { grip: 0.15 } },
+      { name: 'Iron Fingers', desc: '+20% Grip', cost: 18, effect: { grip: 0.2 } },
+      { name: 'Unslipping', desc: '+30% Grip', cost: 40, effect: { grip: 0.3 } },
+      { name: 'Vice Palm', desc: '+25% Grip', cost: 84, effect: { grip: 0.25 } },
     ],
   },
   momentum: {
     id: 'momentum',
-    name: 'Path of Cadence',
+    name: 'Second Wind',
     stat: 'Momentum',
     nodes: [
-      { name: 'Warm-Up', desc: '+4% boost cap, +10% build', cost: 4, effect: { momBoost: 0.04, momBuild: 0.1 } },
-      {
-        name: 'Sustained Strain',
-        desc: 'Unlock hold-to-push: hold click or Space to auto-push.',
-        cost: 10,
-        effect: { holdClick: true },
-      },
-      { name: 'Second Wind', desc: '+0.3s buffer, +12% build', cost: 14, effect: { momDelay: 0.3, momBuild: 0.12 } },
-      { name: 'Perpetual Push', desc: '+6% boost cap, +0.4s buffer', cost: 28, effect: { momBoost: 0.06, momDelay: 0.4 } },
+      { name: 'Warm-Up', desc: '+4% boost cap, +10% build', cost: 8, effect: { momBoost: 0.04, momBuild: 0.1 } },
+      { name: 'Second Wind', desc: '+0.3s buffer, +12% build', cost: 28, effect: { momDelay: 0.3, momBuild: 0.12 } },
+      { name: 'Perpetual Push', desc: '+6% boost cap, +0.4s buffer', cost: 56, effect: { momBoost: 0.06, momDelay: 0.4 } },
+      { name: 'Iron Tempo', desc: '+8% boost cap, +15% build', cost: 150, effect: { momBoost: 0.08, momBuild: 0.15 } },
+    ],
+  },
+  colony: {
+    id: 'colony',
+    name: 'Whisper Choir',
+    stat: 'Colony Throughput',
+    nodes: [
+      { name: 'Whisper Choir', desc: '+15% Colony', cost: 8, effect: { colony: 0.15 } },
+      { name: 'Chain Gang', desc: '+25% Colony', cost: 20, effect: { colony: 0.25 } },
+      { name: 'Underworld Union', desc: '+35% Colony', cost: 44, effect: { colony: 0.35 } },
+      { name: 'Overtime Shades', desc: '+30% Colony', cost: 90, effect: { colony: 0.3 } },
+      { name: 'Damned Dividend', desc: '+40% Colony', cost: 180, effect: { colony: 0.4 } },
     ],
   },
   profit: {
     id: 'profit',
-    name: 'Path of Grudge',
+    name: 'Cursed Interest',
     stat: 'Profit Multiplier',
     nodes: [
-      { name: 'Petty Ledger', desc: '+12% Profit', cost: 3, effect: { profit: 0.12 } },
-      { name: 'Score Settling', desc: '+18% Profit', cost: 8, effect: { profit: 0.18 } },
-      { name: 'Eternal Audit', desc: '+28% Profit', cost: 18, effect: { profit: 0.28 } },
+      { name: 'Petty Ledger', desc: '+18% Profit', cost: 6, effect: { profit: 0.18 } },
+      { name: 'Score Settling', desc: '+27% Profit', cost: 16, effect: { profit: 0.27 } },
+      { name: 'Eternal Audit', desc: '+42% Profit', cost: 36, effect: { profit: 0.42 } },
+      { name: 'Compound Spite', desc: '+33% Profit', cost: 84, effect: { profit: 0.33 } },
+      { name: 'Blood Invoice', desc: '+48% Profit', cost: 170, effect: { profit: 0.48 } },
+    ],
+  },
+  hecateInterval: {
+    id: 'hecateInterval',
+    name: 'Bewitching Tick',
+    stat: "Hecate's Orbs",
+    nodes: [
+      {
+        name: 'Quicker Orbs',
+        desc: 'Hecate orbs arrive 2.5s sooner',
+        cost: 40,
+        effect: { hecateIntervalMod: -2.5 },
+      },
+      {
+        name: 'Moon Pace',
+        desc: 'Orbs 2s sooner',
+        cost: 50,
+        effect: { hecateIntervalMod: -2 },
+      },
+    ],
+  },
+  sureHold: {
+    id: 'sureHold',
+    name: 'Sure Hold',
+    stat: 'Pressure Pierce',
+    requires: [{ branch: 'grip', minLevel: 4 }],
+    nodes: [
+      {
+        name: 'Sure Hold',
+        desc: 'Cut altitude pressure — keep 12% more of each high shove',
+        cost: 176,
+        effect: { gripPierce: 0.12 },
+      },
+    ],
+  },
+  altitudeResist: {
+    id: 'altitudeResist',
+    name: 'Thin Air',
+    stat: 'Altitude Pressure',
+    requires: [{ branch: 'grip', minLevel: 2 }],
+    nodes: [
+      {
+        name: 'Thin Air',
+        desc: '−15% altitude pressure on clicks',
+        cost: 60,
+        effect: { pressureResist: 0.15 },
+      },
+      {
+        name: 'Lighter Burden',
+        desc: '−20% altitude pressure',
+        cost: 110,
+        effect: { pressureResist: 0.2 },
+      },
+      {
+        name: 'Defy the Grade',
+        desc: '−25% altitude pressure',
+        cost: 200,
+        effect: { pressureResist: 0.25 },
+      },
+    ],
+  },
+  sustainedStrain: {
+    id: 'sustainedStrain',
+    name: 'Sustained Strain',
+    stat: 'Hold-to-Push',
+    requires: [{ branch: 'momentum', minLevel: 2 }],
+    nodes: [
+      {
+        name: 'Sustained Strain',
+        desc: 'Unlock hold-to-push: hold click or Space to auto-push.',
+        cost: 20,
+        effect: { holdClick: true },
+      },
+    ],
+  },
+  echo: {
+    id: 'echo',
+    name: 'Residual Momentum',
+    stat: 'Residual Momentum',
+    requires: [{ branch: 'sustainedStrain', minLevel: 1 }],
+    nodes: [
+      {
+        name: 'Echo Step',
+        desc: 'Once built, Momentum no longer drains below 20%',
+        cost: 50,
+        effect: { momFloor: 0.2 },
+      },
+      {
+        name: 'Held Beat',
+        desc: 'Residual Momentum floor 35%',
+        cost: 110,
+        effect: { momFloor: 0.35 },
+      },
+      {
+        name: 'Lingering Drive',
+        desc: 'Residual Momentum floor 50%',
+        cost: 200,
+        effect: { momFloor: 0.5 },
+      },
+      {
+        name: 'Unbroken Pace',
+        desc: 'Residual Momentum floor 65%',
+        cost: 350,
+        effect: { momFloor: 0.65 },
+      },
+      {
+        name: 'Eternal Cadence',
+        desc: 'Residual Momentum floor 80%',
+        cost: 550,
+        effect: { momFloor: 0.8 },
+      },
+    ],
+  },
+  hermes: {
+    id: 'hermes',
+    name: 'Gale Step',
+    stat: 'Hermes',
+    requires: [{ branch: 'colony', minLevel: 1 }],
+    nodes: [
+      {
+        name: 'Sandal Wind',
+        desc: '+30% Hermes idle speed',
+        cost: 40,
+        effect: { hermesPower: 0.3 },
+      },
+      {
+        name: 'Gale Step',
+        desc: '+40% Hermes idle speed',
+        cost: 80,
+        effect: { hermesPower: 0.4 },
+      },
+    ],
+  },
+  shades: {
+    id: 'shades',
+    name: 'Damned Union',
+    stat: 'Shades',
+    requires: [{ branch: 'colony', minLevel: 1 }],
+    nodes: [
+      {
+        name: 'Louder Choir',
+        desc: '+35% Shade idle Distance & Defiance',
+        cost: 45,
+        effect: { shadesPower: 0.35 },
+      },
+      {
+        name: 'Chain Hymn',
+        desc: '+45% Shade idle Distance & Defiance',
+        cost: 85,
+        effect: { shadesPower: 0.45 },
+      },
+    ],
+  },
+  runStipend: {
+    id: 'runStipend',
+    name: 'Pocket Change',
+    stat: 'Starting Defiance',
+    requires: [{ branch: 'profit', minLevel: 1 }],
+    nodes: [
+      {
+        name: 'Pocket Grudge',
+        desc: 'Start each run with +40 Defiance (does not count toward Spite)',
+        cost: 35,
+        effect: { runStipend: 40 },
+      },
+      {
+        name: 'Deeper Pockets',
+        desc: 'Stipend +50 Defiance (90 total)',
+        cost: 75,
+        effect: { runStipend: 50 },
+      },
+    ],
+  },
+  hecatePower: {
+    id: 'hecatePower',
+    name: 'Celestial Bounty',
+    stat: "Hecate's Orbs",
+    requires: [{ branch: 'hecateInterval', minLevel: 1 }],
+    nodes: [
+      {
+        name: 'Heavier Orbs',
+        desc: '+45% Hecate orb Distance & Defiance',
+        cost: 55,
+        effect: { hecatePower: 0.45 },
+      },
+      {
+        name: 'Moon Weight',
+        desc: '+30% orb power',
+        cost: 45,
+        effect: { hecatePower: 0.3 },
+      },
+    ],
+  },
+  sparkTheft: {
+    id: 'sparkTheft',
+    name: 'Stolen Fire',
+    stat: 'Prometheus Fire',
+    requires: [{ branch: 'might', minLevel: 2 }],
+    nodes: [
+      {
+        name: 'Embers',
+        desc: 'Prometheus Fire +15% power, −2s cooldown',
+        cost: 45,
+        effect: { prometheusPower: 0.15, prometheusCdMod: -2 },
+      },
+    ],
+  },
+  cogTheft: {
+    id: 'cogTheft',
+    name: 'Flywheel',
+    stat: "Daedalus' Device",
+    requires: [{ branch: 'might', minLevel: 2 }],
+    nodes: [
+      {
+        name: 'Flywheel',
+        desc: "Daedalus' Device +25% shove, −2s cooldown",
+        cost: 55,
+        effect: { daedalusPower: 0.25, daedalusCdMod: -2 },
+      },
+    ],
+  },
+  stolenRite: {
+    id: 'stolenRite',
+    name: 'Stolen Rite',
+    stat: 'Active Skills',
+    requires: [
+      { branch: 'sparkTheft', minLevel: 1 },
+      { branch: 'cogTheft', minLevel: 1 },
+    ],
+    nodes: [
+      {
+        name: 'Stolen Rite',
+        desc: 'Auto-cast Fire & Device whenever off cooldown (true idle)',
+        cost: 150,
+        effect: { stolenRite: true },
+      },
     ],
   },
 };
+
+/** True when every `requires` entry on a branch is satisfied. */
+export function skillPrereqsMet(skills, branchId) {
+  const branch = SKILL_TREE[branchId];
+  if (!branch?.requires?.length) return true;
+  return branch.requires.every(
+    (r) => (skills[r.branch] || 0) >= (r.minLevel || 1)
+  );
+}
+
+/** Human-readable prereq blurb for UI. */
+export function skillPrereqBlurb(branchId) {
+  const branch = SKILL_TREE[branchId];
+  if (!branch?.requires?.length) return '';
+  return branch.requires
+    .map((r) => {
+      const parent = SKILL_TREE[r.branch];
+      const name = parent?.name || r.branch;
+      return `${name} Lv ${r.minLevel}`;
+    })
+    .join(' + ');
+}
+
+/**
+ * Map legacy skill saves into the 18-node tree.
+ * Pass the raw saved skills object (not merged with defaults).
+ */
+export function migrateSkills(rawSkills = {}) {
+  const s = rawSkills || {};
+  const out = Object.fromEntries(Object.keys(SKILL_TREE).map((k) => [k, 0]));
+
+  const newSchema =
+    'sustainedStrain' in s ||
+    'sureHold' in s ||
+    'altitudeResist' in s ||
+    'hecateInterval' in s ||
+    'sparkTheft' in s ||
+    'runStipend' in s ||
+    'hermes' in s;
+
+  if (newSchema) {
+    for (const id of Object.keys(SKILL_TREE)) {
+      out[id] = Math.min(SKILL_TREE[id].nodes.length, Math.max(0, s[id] | 0));
+    }
+    return out;
+  }
+
+  out.might = Math.min(5, s.might | 0);
+  out.traction = Math.min(5, s.traction | 0);
+
+  const oldGrip = s.grip | 0;
+  out.grip = Math.min(4, oldGrip);
+  out.sureHold = oldGrip >= 5 ? 1 : 0;
+
+  const oldMom = s.momentum | 0;
+  if (oldMom <= 0) {
+    out.momentum = 0;
+    out.sustainedStrain = 0;
+  } else if (oldMom === 1) {
+    out.momentum = 1;
+    out.sustainedStrain = 0;
+  } else {
+    out.sustainedStrain = 1;
+    out.momentum = Math.min(4, oldMom - 1);
+  }
+
+  out.echo = Math.min(5, s.echo | 0);
+  if (out.echo > 0) out.sustainedStrain = 1;
+
+  out.colony = Math.min(5, s.colony | 0);
+  out.profit = Math.min(5, s.profit | 0);
+
+  const oldMtn = s.mountain | 0;
+  out.runStipend = oldMtn >= 2 ? 2 : oldMtn >= 1 ? 1 : 0;
+  out.altitudeResist = oldMtn >= 5 ? 3 : oldMtn >= 4 ? 2 : oldMtn >= 3 ? 1 : 0;
+
+  const oldMsg = s.messengers | 0;
+  if (oldMsg >= 3) {
+    out.hecateInterval = 2;
+    out.hecatePower = 2;
+  } else if (oldMsg === 2) {
+    out.hecateInterval = 1;
+    out.hecatePower = 1;
+  } else if (oldMsg === 1) {
+    out.hecateInterval = 1;
+  }
+
+  const oldAtt = s.attendants | 0;
+  if (oldAtt >= 4) {
+    out.hermes = 2;
+    out.shades = 2;
+  } else if (oldAtt === 3) {
+    out.hermes = 2;
+    out.shades = 1;
+  } else if (oldAtt === 2) {
+    out.hermes = 1;
+    out.shades = 1;
+  } else if (oldAtt === 1) {
+    out.hermes = 1;
+  }
+
+  const oldTheft = s.theft | 0;
+  if (oldTheft >= 3) {
+    out.sparkTheft = 1;
+    out.cogTheft = 1;
+    out.stolenRite = 1;
+  } else if (oldTheft === 2) {
+    out.sparkTheft = 1;
+    out.cogTheft = 1;
+  } else if (oldTheft === 1) {
+    out.sparkTheft = 1;
+  }
+
+  return out;
+}
 
 /** Hades corporate-review lines (rotating). */
 export const HADES_LINES = [
@@ -215,7 +707,36 @@ export const HADES_LINES = [
 ];
 
 export function upgradeCost(def, level) {
-  return Math.floor(def.baseCost * Math.pow(def.costMult, level));
+  const lv = Math.max(0, level | 0);
+  let cost = def.baseCost * Math.pow(def.costMult, lv);
+  // Milestone spikes (Lv 5, 10, …) stay on the curve afterward so the next
+  // buy never undercuts the milestone price.
+  const spikes = Math.floor((lv + 1) / MILESTONE_EVERY);
+  if (spikes > 0) cost *= Math.pow(MILESTONE_COST_MULT, spikes);
+  return Math.floor(cost);
+}
+
+/** True when buying at `currentLevel` would reach a milestone rank (5, 10, …). */
+export function isMilestonePurchase(currentLevel) {
+  return (Math.max(0, currentLevel | 0) + 1) % MILESTONE_EVERY === 0;
+}
+
+/** Milestone ranks every N purchases. */
+export const MILESTONE_EVERY = 5;
+/** Milestone purchase effect vs a normal level. */
+export const MILESTONE_EFFECT = 1.5;
+/** Milestone purchases cost this × the normal curve price. */
+export const MILESTONE_COST_MULT = 2.4;
+
+/**
+ * Convert purchased upgrade levels into effective levels
+ * (milestones count as MILESTONE_EFFECT each).
+ */
+export function effectiveUpgradeLevels(level) {
+  const n = Math.max(0, level | 0);
+  const milestones = Math.floor(n / MILESTONE_EVERY);
+  const rem = n % MILESTONE_EVERY;
+  return milestones * (MILESTONE_EVERY - 1 + MILESTONE_EFFECT) + rem;
 }
 
 /** Aggregate permanent skill multipliers from owned nodes. */
@@ -229,15 +750,30 @@ export function skillBonuses(skillLevels) {
     momBoost: 0,
     momBuild: 0,
     momDelay: 0,
+    momFloor: 0,
     holdClick: false,
+    runStipend: 0,
+    hecateIntervalMod: 0,
+    hecatePower: 0,
+    hermesPower: 0,
+    shadesPower: 0,
+    prometheusPower: 0,
+    prometheusCdMod: 0,
+    daedalusPower: 0,
+    daedalusCdMod: 0,
+    stolenRite: false,
+    gripPierce: 0,
+    pressureResist: 0,
   };
 
   for (const [branchId, branch] of Object.entries(SKILL_TREE)) {
     const owned = skillLevels[branchId] || 0;
     for (let i = 0; i < owned; i++) {
-      const effect = branch.nodes[i].effect;
+      const effect = branch.nodes[i]?.effect;
+      if (!effect) continue;
       for (const [k, v] of Object.entries(effect)) {
-        if (k === 'holdClick') out.holdClick = out.holdClick || !!v;
+        if (k === 'holdClick' || k === 'stolenRite') out[k] = out[k] || !!v;
+        else if (k === 'momFloor') out[k] = Math.max(out[k] || 0, v);
         else out[k] = (out[k] || 0) + v;
       }
     }
@@ -269,39 +805,76 @@ export function deriveStats(state) {
   const s = skillBonuses(state.meta.skills);
   const ngPlus = state.meta.escaped ? 1.5 : 1; // +50% after victory (GDD §6.1.5)
 
-  const might = (1 + u.callousedHands * 1.0) * (1 + s.might) * ngPlus;
-  const traction = (1 + u.spikedSandals * 0.35) * (1 + s.traction);
-  const gripCapacity = (4 + u.chalkedGrip * 5.5) * (1 + s.grip);
-  const colony = (u.shades * SHADES_RATE_PER_LEVEL) * (1 + s.colony) * ngPlus;
-  const profit = (1 + u.grudgeLedger * 0.28) * (1 + s.profit);
-  const hermesConvert = (u.hermesSandals || 0) * HERMES_CONVERT_PER_LEVEL;
-  const hecateLevel = u.hecateOrbs || 0;
+  const hands = effectiveUpgradeLevels(u.callousedHands || 0);
+  const sandals = effectiveUpgradeLevels(u.spikedSandals || 0);
+  const chalk = effectiveUpgradeLevels(u.chalkedGrip || 0);
+  const rhythm = effectiveUpgradeLevels(u.steadyRhythm || 0);
+  const tithe = effectiveUpgradeLevels(u.bloodTithe || 0);
+  const ledger = effectiveUpgradeLevels(u.grudgeLedger || 0);
+  const shadesLv = effectiveUpgradeLevels(u.shades || 0);
+  const hermesEff = effectiveUpgradeLevels(u.hermesSandals || 0);
+  const hecateEff = effectiveUpgradeLevels(u.hecateOrbs || 0);
+  const tempo = effectiveUpgradeLevels(u.relentlessTempo || 0);
+  const prometheusEff = effectiveUpgradeLevels(u.prometheus || 0);
+  const daedalusEff = effectiveUpgradeLevels(u.daedalus || 0);
+
+  const might = (1 + hands * 0.6175) * (1 + s.might) * ngPlus;
+  const traction = (1 + sandals * 0.209) * (1 + s.traction);
+  const gripCapacity = (4 + chalk * 5.225) * (1 + s.grip);
+  const colony = idleRankRate(shadesLv) * (1 + s.colony) * ngPlus;
+  const defianceFlat = DEFIANCE_BASE_PER_METER + tithe * BLOOD_TITHE_PER_LEVEL;
+  const profitMult =
+    (1 + ledger * GRUDGE_LEDGER_PER_LEVEL) * (1 + s.profit);
+  /** Effective Defiance per meter (flat × Ledger × Path of Profit). */
+  const profit = defianceFlat * profitMult;
+  const hermesLevel = hermesEff;
+  const hecateLevel = hecateEff;
+  const prometheusLevel = prometheusEff;
+  const daedalusLevel = daedalusEff;
   const holdClick = !!s.holdClick;
   const holdInterval = holdClick
     ? Math.max(
         HOLD_CLICK_MIN_INTERVAL,
-        HOLD_CLICK_BASE_INTERVAL - (u.relentlessTempo || 0) * HOLD_CLICK_INTERVAL_PER_LEVEL
+        HOLD_CLICK_BASE_INTERVAL - tempo * HOLD_CLICK_INTERVAL_PER_LEVEL
       )
     : null;
 
-  const momentumBoostCap = BASE_MOMENTUM_BOOST + u.steadyRhythm * 0.055 + s.momBoost;
+  const momentumBoostCap = BASE_MOMENTUM_BOOST + rhythm * 0.05225 + s.momBoost;
   const momentumBuild = BASE_MOMENTUM_BUILD * (1 + s.momBuild);
   const momentumDecayDelay = BASE_DECAY_DELAY + s.momDelay;
+  const momentumFloor = Math.max(0, Math.min(0.8, s.momFloor || 0));
 
   return {
     might,
     traction,
     gripCapacity,
     colony,
+    defianceFlat,
+    profitMult,
     profit,
-    hermesConvert,
+    hermesLevel,
     hecateLevel,
+    prometheusLevel,
+    daedalusLevel,
     holdClick,
     holdInterval,
     momentumBoostCap,
     momentumBuild,
     momentumDecayDelay,
+    momentumFloor,
     ngPlus,
+    runStipend: s.runStipend || 0,
+    hecateIntervalMod: s.hecateIntervalMod || 0,
+    hecatePower: s.hecatePower || 0,
+    hermesPower: s.hermesPower || 0,
+    shadesPower: s.shadesPower || 0,
+    prometheusPower: s.prometheusPower || 0,
+    prometheusCdMod: s.prometheusCdMod || 0,
+    daedalusPower: s.daedalusPower || 0,
+    daedalusCdMod: s.daedalusCdMod || 0,
+    stolenRite: !!s.stolenRite,
+    gripPierce: s.gripPierce || 0,
+    pressureResist: s.pressureResist || 0,
   };
 }
 
@@ -322,41 +895,150 @@ export function momentumMultiplier(fill, boostCap) {
  * pressure grows with mountain progress and raw push size.
  */
 /**
- * Grip soft ceiling for *active* clicks (steep late-mountain).
+ * Shared altitude load for HUD + softcaps.
+ * 1.0 = peak of the first summit before compression.
+ * Extreme mountains are log-compressed so late Grip still raises the ceiling
+ * instead of softcapping movement to near-zero.
+ * `pressureResist` (0–0.75) shrinks the mountain’s effective weight.
  */
-export function gripEfficiency(rawPush, gripCapacity, distance, summitDistance = SUMMIT_DISTANCE) {
-  const altitude = distance / Math.max(1, summitDistance);
-  const slopeLoad = 0.55 + Math.pow(altitude, 1.9) * 14;
-  const pressure = Math.max(0, rawPush) * slopeLoad;
-  const grip = Math.max(0.5, gripCapacity);
-  return grip / (grip + pressure);
+export function mountainPressureLoad(
+  distance,
+  summitDistance = SUMMIT_DISTANCE,
+  pressureResist = 0
+) {
+  const altitude = Math.max(0, distance) / Math.max(1, summitDistance);
+  const mountainWeight = Math.max(1, summitDistance / SUMMIT_DISTANCES[0]);
+  const resist = Math.max(0, Math.min(0.75, pressureResist || 0));
+  const raw = Math.pow(altitude, 1.25) * mountainWeight * (1 - resist);
+  return compressPressureLoad(raw);
 }
 
 /**
- * Idle softcap — altitude still bites a little, but high Shades/Hermes rates
- * are NOT punished (otherwise the HUD m/s lie and buffs cancel themselves).
+ * Keep early-game pressure nearly linear; bend hard past ~200% so
+ * mega-summits don't produce five-digit softcap loads.
  */
-export function idleEfficiency(distance, summitDistance = SUMMIT_DISTANCE) {
-  const altitude = distance / Math.max(1, summitDistance);
-  // 1.0 at base → ~0.62 at summit
-  return 1 / (1 + Math.pow(altitude, 1.65) * 0.6);
+export function compressPressureLoad(rawLoad) {
+  const r = Math.max(0, rawLoad);
+  const bend = 2; // stay ~linear through early/mid first-summit peak
+  if (r <= bend) return r;
+  // log2 growth beyond the bend — raw 10→~5.2, raw 100→~8.6, raw 1000→~12
+  return bend + Math.log2(1 + (r - bend));
+}
+
+/** Softcap strength vs compressed load (lower = milder movement tax). */
+export const ALTITUDE_PRESSURE_SOFTCAP = 0.28;
+
+/**
+ * Grip soft ceiling for *active* clicks.
+ * Altitude pressure scales with mountain length, then compresses.
+ * `pierce` keeps a fraction of each shove; `pressureResist` lowers the load.
+ */
+export function gripEfficiency(
+  rawPush,
+  gripCapacity,
+  distance,
+  summitDistance = SUMMIT_DISTANCE,
+  pierce = 0,
+  pressureResist = 0
+) {
+  const load = mountainPressureLoad(distance, summitDistance, pressureResist);
+  // Softer slope than before so Lv+ Grip meaningfully raises the m/s ceiling.
+  // Asymptotic meters/click ≈ grip / slopeLoad once raw shove is large.
+  const slopeLoad = 0.45 + load * 16 * ALTITUDE_PRESSURE_SOFTCAP;
+  const pressure = Math.max(0, rawPush) * slopeLoad;
+  const grip = Math.max(0.5, gripCapacity);
+  const soft = grip / (grip + pressure);
+  const p = Math.max(0, Math.min(0.5, pierce || 0));
+  return p + soft * (1 - p);
+}
+
+/**
+ * HUD readout only — display scale is 10% of true load×100
+ * (e.g. internal 9.35 → 93.5%, not 935%). Does not affect combat math.
+ */
+export function altitudePressurePct(state, stats) {
+  const summitDist = summitDistanceFor(state.meta.summits);
+  const load = mountainPressureLoad(
+    state.run.distance,
+    summitDist,
+    stats?.pressureResist || 0
+  );
+  return Math.max(0, load) * 10;
+}
+
+/** Effective seconds between Hecate orbs (Spite can shorten). */
+export function hecateIntervalFor(stats) {
+  return Math.max(3.5, HECATE_INTERVAL + (stats?.hecateIntervalMod || 0));
+}
+
+/**
+ * Idle softcap — Shades, Hermes, and burst idles (Hecate orbs).
+ * Milder than active grip tax so AFK helps, but still fades on tall mountains.
+ */
+export function idleEfficiency(
+  distance,
+  summitDistance = SUMMIT_DISTANCE,
+  pressureResist = 0
+) {
+  const load = mountainPressureLoad(distance, summitDistance, pressureResist);
+  // Gentler than the old 1.1× curve — compressed load already bent the spike.
+  return 1 / (1 + load * 0.75 * ALTITUDE_PRESSURE_SOFTCAP);
 }
 
 /** Raw + effective passive rates for sim + UI. */
 export function getPassiveRates(state, stats) {
-  const current = Math.max(0, state.run.activePushSpeed || 0);
-  const hermesRaw = current * Math.max(0, stats.hermesConvert || 0);
-  const shadesRaw = Math.max(0, stats.colony) * stats.traction * PASSIVE_DISTANCE_MULT;
+  const hermesLevel = Math.max(0, stats.hermesLevel || 0);
+  // Same stepped curve as Shades; Momentum scales how much Hermes delivers.
+  const hermesBase =
+    hermesLevel > 0
+      ? idleRankRate(hermesLevel) * (1 + (stats.hermesPower || 0))
+      : 0;
+  const shadesBase =
+    Math.max(0, stats.colony) * (1 + (stats.shadesPower || 0));
+
+  const mom = clamp01(state.run.momentum || 0);
+  const hermesMomMult = HERMES_MOMENTUM_FLOOR + (1 - HERMES_MOMENTUM_FLOOR) * mom;
+
+  const shadesRaw = shadesBase;
+  const hermesRaw = hermesBase * hermesMomMult;
+  const shadeLaborPerSec =
+    Math.max(0, stats.colony) *
+    SHADES_LABOR_PER_COLONY *
+    stats.profitMult *
+    (1 + (stats.shadesPower || 0));
+
   const summitDist = summitDistanceFor(state.meta.summits);
-  const eff = idleEfficiency(state.run.distance, summitDist);
+  const efficiency = idleEfficiency(
+    state.run.distance,
+    summitDist,
+    stats.pressureResist || 0
+  );
+  const pace = summitPaceMult(summitDist);
+
   return {
     shadesRaw,
     hermesRaw,
-    efficiency: eff,
-    shadesEffective: shadesRaw * eff,
-    hermesEffective: hermesRaw * eff,
-    totalEffective: (shadesRaw + hermesRaw) * eff,
+    efficiency,
+    paceMult: pace,
+    shadesEffective: shadesRaw * efficiency * pace,
+    hermesEffective: hermesRaw * efficiency * pace,
+    totalEffective: (shadesRaw + hermesRaw) * efficiency * pace,
+    shadesAfkMult: efficiency,
+    hermesMomMult,
+    shadeLaborPerSec,
   };
+}
+
+/**
+ * Live Defiance income estimate (HUD): meters × Def/m + Shade labor.
+ * Active push speed covers clicking/hold; passives cover AFK.
+ */
+export function getDefiancePerSecond(state, stats) {
+  const rates = getPassiveRates(state, stats);
+  const mps = Math.max(0, state.run.activePushSpeed || 0) + rates.totalEffective;
+  const fromMeters = mps * Math.max(0, stats.profit || 0);
+  const fromLabor = Math.max(0, rates.shadeLaborPerSec || 0);
+  return fromMeters + fromLabor;
 }
 
 /**
@@ -368,17 +1050,65 @@ export function resolveClick(state, stats) {
   const momMult = momentumMultiplier(state.run.momentum, stats.momentumBoostCap);
   const seed = stats.might * momMult;
   const rawDistance = seed * stats.traction * CLICK_DISTANCE_MULT;
-  const efficiency = gripEfficiency(rawDistance, stats.gripCapacity, state.run.distance, summitDist);
-  const distance = Math.max(0, rawDistance * efficiency);
-  const rawDefiance = distance * stats.profit * 0.5 + seed * 0.15 * stats.profit;
-  // Every active push grants at least 1 Defiance.
+  const efficiency = gripEfficiency(
+    rawDistance,
+    stats.gripCapacity,
+    state.run.distance,
+    summitDist,
+    stats.gripPierce || 0,
+    stats.pressureResist || 0
+  );
+  let distance = Math.max(0, rawDistance * efficiency * DISTANCE_GAIN_MULT);
+  distance *= summitPaceMult(summitDist);
+  let rawDefiance = distance * stats.profit + seed * 0.1425 * stats.profitMult;
+
+  const fire = prometheusSkill(stats.prometheusLevel || 0);
+  if (fire && (state.run.prometheusBuffTimer || 0) > 0) {
+    const fireMult = fire.pushMult * (1 + (stats.prometheusPower || 0));
+    distance *= fireMult;
+    rawDefiance *= fireMult;
+  }
+
+  // Every active push grants at least 1 Defiance (fractional profit still banks).
   const defiance = Math.max(1, rawDefiance);
 
   return { distance, defiance, momMult, efficiency, seed };
 }
 
 /**
- * Passive tick: Shades (baseline m/s) + Hermes (current-push → background velocity).
+ * Daedalus shove — modest Distance yank; Defiance = 5× current Def/s.
+ */
+export function resolveDaedalusShove(state, stats) {
+  const skill = daedalusSkill(stats.daedalusLevel || 0);
+  if (!skill) return { distance: 0, defiance: 0 };
+
+  const lv = Math.max(1, stats.daedalusLevel || 1);
+  const summitDist = summitDistanceFor(state.meta.summits);
+  const craft = stats.might * 0.4 + stats.gripCapacity * 0.5;
+  const raw =
+    craft * stats.traction * skill.shoveMult * (1 + (stats.daedalusPower || 0));
+  const soft = gripEfficiency(
+    raw,
+    stats.gripCapacity,
+    state.run.distance,
+    summitDist,
+    stats.gripPierce || 0,
+    stats.pressureResist || 0
+  );
+  // Light pierce — helps mid-slope without ignoring the mountain.
+  const pierce = Math.min(0.22, 0.1 + lv * 0.014);
+  let distance = Math.max(0, raw * (pierce + soft * (1 - pierce)) * DISTANCE_GAIN_MULT);
+  distance *= summitPaceMult(summitDist);
+  // Tighter cap — Device is a nudge, not a leap.
+  const cap = Math.max(10 + lv * 2.2, summitDist * (0.001 + lv * 0.00022));
+  distance = Math.min(distance, cap);
+
+  const defiance = Math.max(1, getDefiancePerSecond(state, stats) * 5);
+  return { distance, defiance };
+}
+
+/**
+ * Passive tick: Shades (flat Distance + labor) + Hermes (Momentum escort).
  */
 export function resolvePassive(state, stats, dt) {
   if (dt <= 0) return { distance: 0, defiance: 0 };
@@ -388,9 +1118,10 @@ export function resolvePassive(state, stats, dt) {
     return { distance: 0, defiance: 0 };
   }
 
+  // totalEffective already includes summitPaceMult (HUD + sim stay aligned).
   const distance = Math.max(0, rates.totalEffective * dt);
-  const defiance =
-    distance * stats.profit * 0.5 + stats.colony * 0.08 * stats.profit * dt;
+  // Meters still pay Defiance; Shades also bank flat labor Defiance.
+  const defiance = distance * stats.profit + rates.shadeLaborPerSec * dt;
   return {
     distance,
     defiance,
@@ -398,6 +1129,49 @@ export function resolvePassive(state, stats, dt) {
     hermesRate: rates.hermesEffective,
     efficiency: rates.efficiency,
   };
+}
+
+/**
+ * Boulder crack minigame — timed weak spot on the front face.
+ * Interval / window are generous; payouts are helpful but capped.
+ */
+export const CRACK_INTERVAL_MIN = 18;
+export const CRACK_INTERVAL_MAX = 25;
+export const CRACK_WINDOW = 3.0;
+/** Hit radius as a fraction of boulder draw radius. */
+export const CRACK_HIT_FRAC = 0.16;
+
+export function nextCrackInterval() {
+  return CRACK_INTERVAL_MIN + Math.random() * (CRACK_INTERVAL_MAX - CRACK_INTERVAL_MIN);
+}
+
+/** Normalized offset on the boulder disk (front face). */
+export function randomCrackOffset() {
+  for (let i = 0; i < 16; i++) {
+    const nx = (Math.random() * 2 - 1) * 0.7;
+    const ny = (Math.random() * 2 - 1) * 0.7;
+    if (nx * nx + ny * ny <= 0.7 * 0.7) return { nx, ny };
+  }
+  return { nx: 0.25, ny: -0.2 };
+}
+
+/**
+ * Crack-hit payout: scaled from a normal click, then hard-capped
+ * so it stays a bonus — not a shop printer.
+ */
+export function resolveCrackHit(state, stats) {
+  const click = resolveClick(state, stats);
+  const summitDist = summitDistanceFor(state.meta.summits);
+
+  let distance = click.distance * (5 + Math.random() * 4); // ~5–9×
+  const distCap = Math.max(14, summitDist * 0.0045);
+  distance = Math.min(distance, distCap);
+
+  let defiance = Math.max(1, click.defiance) * (10 + Math.random() * 8); // ~10–18×
+  const defCap = Math.max(28, 18 + stats.might * 6 + stats.profit * 14);
+  defiance = Math.min(defiance, defCap);
+
+  return { distance, defiance };
 }
 
 /**
@@ -411,36 +1185,53 @@ export function resolveHecateOrb(state, stats) {
   const summitDist = summitDistanceFor(state.meta.summits);
   const current = Math.max(0, state.run.activePushSpeed || 0);
   // ~3–20m across early levels; stays a nudge, not a teleport.
-  const raw = (1.5 + level * 1.15 + current * 0.04) * stats.traction;
-  const efficiency = idleEfficiency(state.run.distance, summitDist);
-  const distance = Math.max(0, raw * efficiency);
-  const defiance = distance * stats.profit * 0.5;
+  const power = 1 + (stats.hecatePower || 0);
+  const raw = (1.5 + level * 1.15 + current * 0.04) * stats.traction * power;
+  const efficiency = idleEfficiency(
+    state.run.distance,
+    summitDist,
+    stats.pressureResist || 0
+  );
+  const distance = Math.max(
+    0,
+    raw * efficiency * DISTANCE_GAIN_MULT * summitPaceMult(summitDist)
+  );
+  const defiance = distance * stats.profit;
   return { distance, defiance };
 }
 
 /**
  * Spite payout from a finished run's total Defiance earned.
- * Uses √ so long climbs don't explode linearly, but the coefficient must stay
- * low — full skill tree costs ~193, so a first clear should only buy a few nodes.
- * (Old 0.65 paid ~155 on a 10k run.)
+ * First summit targets ~20; later clears pay a bit more base + mild Defiance scaling.
  */
 export function spiteFromRun(runDefianceEarned, summitCount) {
   const d = Math.max(0, runDefianceEarned);
-  const base = Math.floor(Math.sqrt(d) * 0.08);
-  const bonus = Math.floor(summitCount * 0.5);
-  return Math.max(1, base + bonus);
+  const n = Math.max(1, Math.floor(summitCount || 1));
+  // Clear #1 → 16, #2 → 20, #3 → 24, …
+  const fromSummit = 12 + n * 4;
+  const fromDefiance = Math.floor(Math.sqrt(d) * 0.05 + d / 7000);
+  return fromSummit + fromDefiance;
 }
 
 export function formatNumber(n, digits = 1) {
   if (!Number.isFinite(n)) return '0';
   const abs = Math.abs(n);
-  if (abs >= 1e9) return (n / 1e9).toFixed(Math.max(digits, 1)) + 'B';
-  if (abs >= 1e6) return (n / 1e6).toFixed(Math.max(digits, 1)) + 'M';
-  if (abs >= 1e4) return (n / 1e3).toFixed(Math.max(digits, 1)) + 'K';
-  if (digits === 0) return Math.round(n).toLocaleString();
+  const d = Math.max(0, digits | 0);
+  // Integer goals / currency: no forced .0 on K/M/B.
+  if (d === 0) {
+    if (abs >= 1e9) return Math.round(n / 1e9) + 'B';
+    if (abs >= 1e6) return Math.round(n / 1e6) + 'M';
+    if (abs >= 1e4) return Math.round(n / 1e3) + 'K';
+    return Math.round(n).toLocaleString();
+  }
+  if (abs >= 1e9) return (n / 1e9).toFixed(d) + 'B';
+  if (abs >= 1e6) return (n / 1e6).toFixed(d) + 'M';
+  if (abs >= 1e4) return (n / 1e3).toFixed(d) + 'K';
+  // Keep requested decimals while climbing (don't strip at 10 / 100).
+  if (d >= 2) return n.toFixed(d);
   if (abs >= 100) return Math.floor(n).toLocaleString();
   if (abs >= 10) return n.toFixed(1);
-  return n.toFixed(Math.min(digits, 2));
+  return n.toFixed(Math.min(d, 2));
 }
 
 export function clamp01(x) {

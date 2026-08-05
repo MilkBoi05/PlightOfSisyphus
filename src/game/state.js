@@ -10,6 +10,9 @@ import {
   deriveStats,
   upgradeCost,
   isUpgradeUnlocked,
+  skillBonuses,
+  migrateSkills,
+  skillPrereqsMet,
 } from './formulas.js';
 
 const SAVE_KEY = 'sisyphus_incremental_v1';
@@ -26,11 +29,28 @@ export function createInitialState() {
       boulderRotation: 0, // radians (displayed; fed from spinQueue)
       spinQueue: 0, // pending roll radians to ease in
       visualDistance: 0, // eased along path for camera/actors
+      /**
+       * Meters that count for gameplay but the camera should not chase
+       * (e.g. Daedalus Device banks progress without a rocket slide).
+       */
+      visualSlack: 0,
+      /** Smoothed on-screen m/s ceiling (eases between passive/active max). */
+      visualSpeedCap: 5,
       pushPulse: 0, // visual squash/stretch timer
       peakActiveSpeed: 0, // legacy; unused
-      activePushSpeed: 0, // current active m/s (Hermes feeds on this)
+      activePushSpeed: 0, // current active m/s (Hecate / stats readout)
       lastPushTime: 0, // performance.now()/1000 of last click
       hecateTimer: 0, // seconds toward next Hecate orb
+      prometheusCd: 0,
+      daedalusCd: 0,
+      prometheusBuffTimer: 0,
+      skillFx: null, // { kind, t } cast flash for renderer
+      /** Timed boulder weak-spot: { nx, ny, life, maxLife } or null. */
+      crackSpot: null,
+      /** Seconds until next crack appears (when no spot is up). */
+      crackTimer: 12,
+      /** Brief toast after a successful crack hit. */
+      crackToast: null, // { t, distance, defiance }
       upgrades: Object.fromEntries(Object.keys(RUN_UPGRADES).map((k) => [k, 0])),
     },
     meta: {
@@ -65,16 +85,25 @@ export function loadState() {
     // Visual fields aren't saved — start caught up with real distance.
     run.visualDistance = run.distance;
     run.spinQueue = 0;
-    // Defiance is whole currency only.
+    // Ephemeral crack minigame — never restore mid-spot from save.
+    run.crackSpot = null;
+    run.crackToast = null;
+    if (!(run.crackTimer > 0)) run.crackTimer = 10 + Math.random() * 8;
+    // Spendable Defiance is whole; keep fractional bank across sessions.
     run.defiance = Math.floor(run.defiance || 0);
-    run.defianceRemainder = 0;
-    run.runDefianceEarned = Math.floor(run.runDefianceEarned || 0);
+    run.defianceRemainder = Math.max(0, Number(parsed.run?.defianceRemainder) || 0);
+    if (run.defianceRemainder >= 1) {
+      const extra = Math.floor(run.defianceRemainder);
+      run.defianceRemainder -= extra;
+      run.defiance += extra;
+    }
+    run.runDefianceEarned = Number(parsed.run?.runDefianceEarned) || 0;
     return {
       run,
       meta: {
         ...fresh.meta,
         ...parsed.meta,
-        skills: { ...fresh.meta.skills, ...(parsed.meta?.skills || {}) },
+        skills: migrateSkills(parsed.meta?.skills || {}),
         totalDefiance: Math.floor(parsed.meta?.totalDefiance || 0),
       },
       ui: { ...fresh.ui },
@@ -90,6 +119,7 @@ export function saveState(state) {
       run: {
         distance: state.run.distance,
         defiance: state.run.defiance,
+        defianceRemainder: state.run.defianceRemainder || 0,
         runDefianceEarned: state.run.runDefianceEarned,
         momentum: state.run.momentum,
         upgrades: state.run.upgrades,
@@ -112,14 +142,37 @@ export function resetRunProgress(state) {
   state.run.boulderRotation = 0;
   state.run.spinQueue = 0;
   state.run.visualDistance = 0;
+  state.run.visualSlack = 0;
+  state.run.visualSpeedCap = 5;
   state.run.pushPulse = 0;
   state.run.peakActiveSpeed = 0;
   state.run.activePushSpeed = 0;
   state.run.lastPushTime = 0;
   state.run.hecateTimer = 0;
+  state.run.prometheusCd = 0;
+  state.run.daedalusCd = 0;
+  state.run.prometheusBuffTimer = 0;
+  state.run.skillFx = null;
+  state.run.crackSpot = null;
+  state.run.crackTimer = 10 + Math.random() * 8;
+  state.run.crackToast = null;
   for (const key of Object.keys(state.run.upgrades)) {
     state.run.upgrades[key] = 0;
   }
+}
+
+/** Grant Pocket Grudge stipend. Does not count toward Spite. */
+export function applyRunStipend(state) {
+  const amount = Math.floor(skillBonuses(state.meta.skills).runStipend || 0);
+  if (amount <= 0) return 0;
+  state.run.defiance += amount;
+  return amount;
+}
+
+/** Full run wipe + stipend (summit continue / restart). */
+export function beginNewRun(state) {
+  resetRunProgress(state);
+  applyRunStipend(state);
 }
 
 /** Wipe run + meta + save (full new game). */
@@ -152,9 +205,17 @@ export function buyUpgrade(state, upgradeId) {
   return true;
 }
 
+/** Buy as many levels as current Defiance allows (Ctrl/Cmd+click). */
+export function buyUpgradeMax(state, upgradeId) {
+  let bought = 0;
+  while (buyUpgrade(state, upgradeId)) bought += 1;
+  return bought;
+}
+
 export function canBuySkillNode(state, branchId) {
   const branch = SKILL_TREE[branchId];
   if (!branch) return false;
+  if (!skillPrereqsMet(state.meta.skills, branchId)) return false;
   const owned = state.meta.skills[branchId] || 0;
   if (owned >= branch.nodes.length) return false;
   const node = branch.nodes[owned];
@@ -164,12 +225,18 @@ export function canBuySkillNode(state, branchId) {
 export function buySkillNode(state, branchId) {
   const branch = SKILL_TREE[branchId];
   if (!branch) return false;
+  if (!skillPrereqsMet(state.meta.skills, branchId)) return false;
   const owned = state.meta.skills[branchId] || 0;
   if (owned >= branch.nodes.length) return false;
   const node = branch.nodes[owned];
   if (state.meta.spite < node.cost) return false;
+
+  const stipendBefore = skillBonuses(state.meta.skills).runStipend || 0;
   state.meta.spite -= node.cost;
   state.meta.skills[branchId] = owned + 1;
+  const stipendAfter = skillBonuses(state.meta.skills).runStipend || 0;
+  const stipendGain = Math.floor(stipendAfter - stipendBefore);
+  if (stipendGain > 0) state.run.defiance += stipendGain;
   return true;
 }
 

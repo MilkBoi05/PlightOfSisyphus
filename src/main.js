@@ -5,19 +5,30 @@
 import {
   BASE_MOMENTUM_DECAY,
   VICTORY_SUMMIT,
-  HECATE_INTERVAL,
   ACTIVE_SPEED_DECAY,
+  CRACK_WINDOW,
   resolveClick,
   resolvePassive,
   resolveHecateOrb,
+  resolveDaedalusShove,
+  resolveCrackHit,
+  prometheusSkill,
+  daedalusSkill,
   spiteFromRun,
   clamp01,
   summitDistanceFor,
+  hecateIntervalFor,
+  nextCrackInterval,
+  randomCrackOffset,
+  visualMpsCapped,
+  blendVisualSpeedCap,
+  VISUAL_MPS_PASSIVE_MAX,
+  DISPLAY_METER_SCALE,
 } from './game/formulas.js';
 import {
   loadState,
   saveState,
-  resetRunProgress,
+  beginNewRun,
   hardResetState,
   getLiveStats,
 } from './game/state.js';
@@ -34,6 +45,8 @@ let uiAcc = 0;
 
 const ui = createUI(state, {
   onSummitContinue: () => completeSummit(),
+  onCastPrometheus: () => castPrometheus(),
+  onCastDaedalus: () => castDaedalus(),
   onStateChange: () => {
     ui.refresh();
     saveState(state);
@@ -51,12 +64,50 @@ function beginHold(opts = {}) {
   const stats = getLiveStats(state);
   const canHold = !!stats.holdClick;
 
+  // Crack spots only count for real pointer aim (not Space / auto-hold).
+  if (Number.isFinite(opts.clientX) && Number.isFinite(opts.clientY)) {
+    tryHitCrack(opts.clientX, opts.clientY);
+  }
+
   // Always push once on press.
   doPush(opts);
 
   if (!canHold) return;
   holding = true;
   holdAcc = 0;
+}
+
+function tryHitCrack(clientX, clientY) {
+  const spot = state.run.crackSpot;
+  if (!spot || !(spot.life > 0)) return false;
+  if (!renderer.hitTestCrackSpot(clientX, clientY, state)) return false;
+
+  const stats = getLiveStats(state);
+  const bonus = resolveCrackHit(state, stats);
+  const distBefore = state.run.distance;
+  applyGains(bonus.distance, bonus.defiance);
+  const distGained = state.run.distance - distBefore;
+
+  state.run.crackSpot = null;
+  state.run.crackTimer = nextCrackInterval();
+  state.run.crackToast = {
+    t: 2.2,
+    distance: bonus.distance,
+    defiance: bonus.defiance,
+  };
+  state.run.pushPulse = Math.min(1, state.run.pushPulse + 0.85);
+  triggerSkillFx('crack');
+
+  if (distGained > 0) {
+    const summitDist = summitDistanceFor(state.meta.summits);
+    const progress = state.run.distance / summitDist;
+    state.run.spinQueue +=
+      renderer.rollRadiansForDistance(distGained, progress, summitDist) * 1.6;
+    renderer.burstDust(state, { clientX, clientY });
+  }
+
+  checkSummit();
+  return true;
 }
 
 function endHold() {
@@ -112,6 +163,14 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     beginHold();
   }
+  if (e.code === 'KeyQ') {
+    e.preventDefault();
+    castPrometheus();
+  }
+  if (e.code === 'KeyF') {
+    e.preventDefault();
+    castDaedalus();
+  }
 });
 
 window.addEventListener('keyup', (e) => {
@@ -123,6 +182,10 @@ window.addEventListener('keyup', (e) => {
 window.addEventListener('blur', () => endHold());
 
 window.addEventListener('resize', () => renderer.resize());
+// Catches layout-driven size changes (devtools dock, zoom) that skip window resize.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => renderer.resize()).observe(canvas);
+}
 renderer.resize();
 
 /**
@@ -139,16 +202,24 @@ function doPush(opts = {}) {
   applyGains(result.distance, result.defiance);
   const distGained = state.run.distance - distBefore;
 
-  // Track current active push speed (m/s) for Hermes Sandals.
+  // Track current active push speed (m/s) for Hecate / stats / walk.
   const nowSec = performance.now() / 1000;
   if (distGained > 0) {
-    const gap = state.run.lastPushTime
-      ? Math.max(0.05, Math.min(1.5, nowSec - state.run.lastPushTime))
+    const rawGap = state.run.lastPushTime
+      ? nowSec - state.run.lastPushTime
       : 0.2;
+    // After a pause, don’t invent a huge m/s from dist / tiny window.
+    const gap =
+      rawGap > 0.45
+        ? 0.4
+        : Math.max(0.08, Math.min(1.2, rawGap));
     const speed = distGained / gap;
-    // Blend toward latest click rate so it reads as "current", not a sticky peak.
     const prev = state.run.activePushSpeed || 0;
-    state.run.activePushSpeed = prev * 0.35 + speed * 0.65;
+    const keep = prev < 0.15 ? 0.3 : 0.4;
+    let next = prev * keep + speed * (1 - keep);
+    // Cold start: cap the first sample so one click can’t claim a sprint.
+    if (prev < 0.2) next = Math.min(next, 4);
+    state.run.activePushSpeed = next;
   }
   state.run.lastPushTime = nowSec;
 
@@ -165,7 +236,9 @@ function doPush(opts = {}) {
   if (distGained > 0) {
     const summitDist = summitDistanceFor(state.meta.summits);
     const progress = state.run.distance / summitDist;
-    state.run.spinQueue += renderer.rollRadiansForDistance(distGained, progress, summitDist);
+    // Light punch only — sustained roll comes from visualDistance catch-up.
+    state.run.spinQueue +=
+      renderer.rollRadiansForDistance(distGained, progress, summitDist) * 0.18;
   }
   state.meta.totalClicks += 1;
   state.ui.lastClickFx = performance.now();
@@ -174,20 +247,79 @@ function doPush(opts = {}) {
   ui.refresh();
 }
 
+function triggerSkillFx(kind) {
+  state.run.skillFx = { kind, t: 1 };
+}
+
+function castPrometheus() {
+  if (state.ui.summitPending) return false;
+  const stats = getLiveStats(state);
+  const skill = prometheusSkill(stats.prometheusLevel || 0);
+  if (!skill) return false;
+  if ((state.run.prometheusCd || 0) > 0) return false;
+
+  state.run.prometheusBuffTimer = skill.duration;
+  state.run.prometheusCd = Math.max(12, skill.cooldown + (stats.prometheusCdMod || 0));
+  triggerSkillFx('prometheus');
+  ui.refresh();
+  return true;
+}
+
+function castDaedalus() {
+  if (state.ui.summitPending) return false;
+  const stats = getLiveStats(state);
+  const skill = daedalusSkill(stats.daedalusLevel || 0);
+  if (!skill) return false;
+  if ((state.run.daedalusCd || 0) > 0) return false;
+
+  const result = resolveDaedalusShove(state, stats);
+  const distBefore = state.run.distance;
+  const visualBefore = state.run.visualDistance ?? distBefore;
+  applyGains(result.distance, result.defiance);
+  const distGained = state.run.distance - distBefore;
+
+  state.run.daedalusCd = Math.max(18, skill.cooldown + (stats.daedalusCdMod || 0));
+  // Full meters/Def bank instantly; only a tiny cosmetic shove on camera.
+  state.run.pushPulse = Math.min(1, state.run.pushPulse + 0.22);
+  state.run._lastDaedalusGain = distGained;
+  state.run._lastDaedalusDef = Math.floor(result.defiance || 0);
+  triggerSkillFx('daedalus');
+
+  if (distGained > 0) {
+    const summitDist = summitDistanceFor(state.meta.summits);
+    const progress = state.run.distance / summitDist;
+    const visualNudge = Math.min(1.2, 0.55 + distGained * 0.02);
+    state.run.visualDistance = Math.min(state.run.distance, visualBefore + visualNudge);
+    // Remaining Device meters stay in slack — camera must not chase them.
+    state.run.visualSlack =
+      (state.run.visualSlack || 0) + Math.max(0, distGained - visualNudge);
+    state.run.spinQueue +=
+      renderer.rollRadiansForDistance(visualNudge, progress, summitDist) * 0.7;
+    renderer.burstDust(state, {
+      clientX: lastPointerClientX,
+      clientY: lastPointerClientY,
+    });
+  }
+
+  checkSummit();
+  ui.refresh();
+  return true;
+}
+
 function applyGains(distance, defiance) {
   const summitDist = summitDistanceFor(state.meta.summits);
   if (distance > 0) {
     state.run.distance = Math.min(summitDist, state.run.distance + distance);
   }
   if (defiance > 0) {
-    // Whole Defiance only — bank fractions across ticks so idle isn't starved.
+    // Bank the full fractional payout; only whole Defiance is spendable/displayed.
     state.run.defianceRemainder = (state.run.defianceRemainder || 0) + defiance;
+    state.run.runDefianceEarned += defiance;
+    state.meta.totalDefiance += defiance;
     const gained = Math.floor(state.run.defianceRemainder);
     if (gained > 0) {
       state.run.defianceRemainder -= gained;
       state.run.defiance += gained;
-      state.run.runDefianceEarned += gained;
-      state.meta.totalDefiance += gained;
     }
   }
 }
@@ -198,6 +330,8 @@ function checkSummit() {
 
   state.run.distance = summitDist;
   state.run.visualDistance = summitDist;
+  state.run.visualSlack = 0;
+  state.run.visualSpeedCap = VISUAL_MPS_PASSIVE_MAX;
   const nextSummit = state.meta.summits + 1;
   const award = spiteFromRun(state.run.runDefianceEarned, nextSummit);
   const kind = nextSummit >= VICTORY_SUMMIT && !state.meta.escaped ? 'victory' : 'review';
@@ -220,7 +354,7 @@ function completeSummit() {
     state.meta.escaped = true;
   }
 
-  resetRunProgress(state);
+  beginNewRun(state);
   state.ui.summitPending = false;
   state.ui.summitKind = null;
   state.ui.spiteAward = 0;
@@ -256,12 +390,48 @@ function tick(dt) {
     }
   }
 
-  // Current push speed fades after you stop clicking (Hermes tracks "now", not peak).
-  if (state.run.activePushSpeed > 0) {
-    const sincePush = performance.now() / 1000 - (state.run.lastPushTime || 0);
-    if (sincePush > 0.3) {
-      state.run.activePushSpeed *= Math.exp(-dt * ACTIVE_SPEED_DECAY);
-      if (state.run.activePushSpeed < 0.02) state.run.activePushSpeed = 0;
+  // Current push speed fades as soon as you stop clicking (hold keeps it alive).
+  if (state.run.activePushSpeed > 0 && !holding) {
+    state.run.activePushSpeed *= Math.exp(-dt * ACTIVE_SPEED_DECAY);
+    if (state.run.activePushSpeed < 0.02) state.run.activePushSpeed = 0;
+  }
+
+  // Active skills — cooldowns + Prometheus buff window + cast FX fade.
+  if ((state.run.prometheusCd || 0) > 0) {
+    state.run.prometheusCd = Math.max(0, state.run.prometheusCd - dt);
+  }
+  if ((state.run.daedalusCd || 0) > 0) {
+    state.run.daedalusCd = Math.max(0, state.run.daedalusCd - dt);
+  }
+  if ((state.run.prometheusBuffTimer || 0) > 0) {
+    state.run.prometheusBuffTimer = Math.max(0, state.run.prometheusBuffTimer - dt);
+  }
+  if (state.run.skillFx) {
+    state.run.skillFx.t -= dt * 2.2;
+    if (state.run.skillFx.t <= 0) state.run.skillFx = null;
+  }
+  if (state.run.crackToast) {
+    state.run.crackToast.t -= dt;
+    if (state.run.crackToast.t <= 0) state.run.crackToast = null;
+  }
+
+  // Boulder crack minigame — one weak spot at a time.
+  if (state.run.crackSpot) {
+    state.run.crackSpot.life -= dt;
+    if (state.run.crackSpot.life <= 0) {
+      state.run.crackSpot = null;
+      state.run.crackTimer = nextCrackInterval();
+    }
+  } else {
+    state.run.crackTimer = (state.run.crackTimer || 0) - dt;
+    if (state.run.crackTimer <= 0) {
+      const off = randomCrackOffset();
+      state.run.crackSpot = {
+        nx: off.nx,
+        ny: off.ny,
+        life: CRACK_WINDOW,
+        maxLife: CRACK_WINDOW,
+      };
     }
   }
 
@@ -273,9 +443,10 @@ function tick(dt) {
 
   // Hecate orbs — periodic anti-gravity spikes
   if (stats.hecateLevel > 0) {
+    const hecateIv = hecateIntervalFor(stats);
     state.run.hecateTimer = (state.run.hecateTimer || 0) + dt;
-    if (state.run.hecateTimer >= HECATE_INTERVAL) {
-      state.run.hecateTimer -= HECATE_INTERVAL;
+    if (state.run.hecateTimer >= hecateIv) {
+      state.run.hecateTimer -= hecateIv;
       const orb = resolveHecateOrb(state, stats);
       distBefore = state.run.distance;
       applyGains(orb.distance, orb.defiance);
@@ -286,17 +457,32 @@ function tick(dt) {
     }
   }
 
+  // Stolen Rite — auto-cast skills when ready (true idle).
+  if (stats.stolenRite) {
+    castPrometheus();
+    castDaedalus();
+  }
+
   // Queue roll the same way as clicks (drained smoothly below).
   if (distGained > 0) {
     const summitDist = summitDistanceFor(state.meta.summits);
     const progress = state.run.distance / summitDist;
-    state.run.spinQueue += renderer.rollRadiansForDistance(distGained, progress, summitDist);
+    // Light punch — main roll tracks visual catch-up in easeVisuals.
+    state.run.spinQueue +=
+      renderer.rollRadiansForDistance(distGained, progress, summitDist) * 0.12;
   }
 
-  // Momentum: delay buffer, then decay. Clicks always allowed.
+  // Momentum: delay buffer, then decay — Cadence can leave a residual floor.
   state.run.momentumIdleTimer += dt;
   if (state.run.momentumIdleTimer > stats.momentumDecayDelay) {
-    state.run.momentum = clamp01(state.run.momentum - BASE_MOMENTUM_DECAY * dt);
+    let next = state.run.momentum - BASE_MOMENTUM_DECAY * dt;
+    if (next < 0) next = 0;
+    const floor = stats.momentumFloor || 0;
+    // Floor only holds once you've built Momentum this run (no free start).
+    if (floor > 0 && state.run.momentum > 0) {
+      next = Math.max(floor, next);
+    }
+    state.run.momentum = clamp01(next);
   }
 
   // Push squash — slower decay so it doesn't pop.
@@ -306,12 +492,53 @@ function tick(dt) {
   checkSummit();
 }
 
-/** Ease camera path + boulder roll so clicks don't teleport. */
+/** Ease camera path + boulder roll — smoothed ceiling between 5 passive / 10 active. */
 function easeVisuals(dt) {
-  const follow = 1 - Math.exp(-dt * 7);
-  state.run.visualDistance += (state.run.distance - state.run.visualDistance) * follow;
+  if (dt <= 0) return;
+  const pushMps = Math.max(0, state.run.activePushSpeed || 0);
+  const sincePush =
+    performance.now() / 1000 - (state.run.lastPushTime || 0);
+  // Cap follows input, not the long activePushSpeed tail — otherwise walk/camera
+  // stay at the active ceiling for seconds after you stop clicking.
+  const wantActiveCap = holding || sincePush < 0.1;
+  state.run.visualSpeedCap = blendVisualSpeedCap(
+    state.run.visualSpeedCap,
+    wantActiveCap,
+    dt
+  );
+  const cap = state.run.visualSpeedCap;
 
-  const spinFollow = 1 - Math.exp(-dt * 10);
+  const slack = Math.max(0, state.run.visualSlack || 0);
+  // Chase real distance minus Device slack — banked Device meters stay off-camera.
+  const visualTarget = Math.max(0, state.run.distance - slack);
+  const prevVisual = state.run.visualDistance;
+  const gap = visualTarget - prevVisual;
+  if (gap > 0) {
+    const gapMps = gap * 7;
+    const realMps = wantActiveCap ? Math.max(gapMps, pushMps) : gapMps;
+    const cappedMps = visualMpsCapped(realMps, cap);
+    state.run.visualDistance = Math.min(
+      visualTarget,
+      prevVisual + cappedMps * dt
+    );
+  }
+
+  // Rolling-without-slip: spin tracks how far the camera actually moved this frame
+  // so it eases down with the visual cap instead of dying when clicks stop.
+  const visualDelta = Math.max(0, state.run.visualDistance - prevVisual);
+  if (visualDelta > 0) {
+    const summitDist = summitDistanceFor(state.meta.summits);
+    const progress = state.run.visualDistance / Math.max(1, summitDist);
+    state.run.boulderRotation += renderer.rollRadiansForDistance(
+      visualDelta,
+      progress,
+      summitDist
+    );
+  }
+
+  // Extra click punch drains gently when idle so it doesn’t cut out hard.
+  const spinRate = wantActiveCap ? 7 : 1.8;
+  const spinFollow = 1 - Math.exp(-dt * spinRate);
   const spun = state.run.spinQueue * spinFollow;
   state.run.boulderRotation += spun;
   state.run.spinQueue -= spun;
@@ -326,8 +553,14 @@ function frame(ts) {
   saveAcc += dt;
   uiAcc += dt;
 
-  // HUD throttled; canvas every frame for smooth rotation.
-  if (uiAcc >= 0.1) {
+  // HUD throttled; faster while a skill buff/FX is up so the status timer reads clean.
+  const skillHudHot =
+    (state.run.prometheusBuffTimer || 0) > 0 ||
+    (state.run.skillFx && state.run.skillFx.t > 0) ||
+    (state.run.crackSpot && state.run.crackSpot.life > 0) ||
+    (state.run.crackToast && state.run.crackToast.t > 0);
+  const uiInterval = skillHudHot ? 0.05 : 0.1;
+  if (uiAcc >= uiInterval) {
     uiAcc = 0;
     ui.refresh();
   }
@@ -350,7 +583,7 @@ document.getElementById('debug-restart')?.addEventListener('click', () => {
   state.ui.spiteAward = 0;
   const overlay = document.getElementById('summit-overlay');
   if (overlay) overlay.hidden = true;
-  resetRunProgress(state);
+  beginNewRun(state);
   saveState(state);
   ui.refresh();
 });
@@ -371,11 +604,14 @@ document.getElementById('debug-skip-100')?.addEventListener('click', () => {
   if (state.ui.summitPending) return;
   const summitDist = summitDistanceFor(state.meta.summits);
   const before = state.run.distance;
-  const next = Math.min(summitDist, before + 1000);
+  // Button is labelled in displayed meters (+100 m).
+  const step = 100 / DISPLAY_METER_SCALE;
+  const next = Math.min(summitDist, before + step);
   const gained = next - before;
   if (gained <= 0) return;
   state.run.distance = next;
   state.run.visualDistance = next;
+  state.run.visualSlack = 0;
   state.run.spinQueue += renderer.rollRadiansForDistance(gained, next / summitDist, summitDist);
   checkSummit();
   ui.refresh();
@@ -386,10 +622,73 @@ document.getElementById('debug-summit')?.addEventListener('click', () => {
   const summitDist = summitDistanceFor(state.meta.summits);
   state.run.distance = summitDist;
   state.run.visualDistance = summitDist;
+  state.run.visualSlack = 0;
   state.run.spinQueue = 0;
   checkSummit();
   ui.refresh();
 });
+
+function syncAnimTargetFromUi() {
+  const sel = document.getElementById('debug-anim-target');
+  if (sel) renderer.setAnimDebugTarget(sel.value);
+}
+
+function refreshAnimFrameLabel() {
+  const el = document.getElementById('debug-anim-frame');
+  if (!el) return;
+  const info = renderer.getAnimFrameDebug();
+  const fmt = (d, prefix) => {
+    const name = `${prefix}${String(d.frame).padStart(2, '0')}`;
+    return d.locked ? name : `auto(${name})`;
+  };
+  if (info.target === 'boulder') el.textContent = fmt(info.boulder, 'b');
+  else if (info.target === 'sisy') el.textContent = fmt(info.sisy, 's');
+  else el.textContent = `${fmt(info.sisy, 's')} ${fmt(info.boulder, 'b')}`;
+}
+
+function refreshAnimSpeedLabel() {
+  const el = document.getElementById('debug-anim-speed');
+  if (!el) return;
+  const m = renderer.getAnimSpeedMult();
+  el.textContent = `${m}×`;
+}
+
+document.getElementById('debug-anim-target')?.addEventListener('change', () => {
+  syncAnimTargetFromUi();
+  refreshAnimFrameLabel();
+});
+document.getElementById('debug-anim-prev')?.addEventListener('click', () => {
+  syncAnimTargetFromUi();
+  renderer.stepAnimFrame(-1);
+  refreshAnimFrameLabel();
+});
+document.getElementById('debug-anim-next')?.addEventListener('click', () => {
+  syncAnimTargetFromUi();
+  renderer.stepAnimFrame(1);
+  refreshAnimFrameLabel();
+});
+document.getElementById('debug-anim-play')?.addEventListener('click', () => {
+  syncAnimTargetFromUi();
+  renderer.playAnimFrames();
+  refreshAnimFrameLabel();
+});
+document.getElementById('debug-anim-slower')?.addEventListener('click', () => {
+  renderer.nudgeAnimSpeed(-1);
+  refreshAnimSpeedLabel();
+});
+document.getElementById('debug-anim-faster')?.addEventListener('click', () => {
+  renderer.nudgeAnimSpeed(1);
+  refreshAnimSpeedLabel();
+});
+const animTargetEl = document.getElementById('debug-anim-target');
+if (animTargetEl) {
+  animTargetEl.value = renderer.getAnimDebugTarget();
+}
+// Ensure nothing is left frozen from a prior scrub.
+renderer.playAnimFrames();
+refreshAnimFrameLabel();
+refreshAnimSpeedLabel();
+setInterval(refreshAnimFrameLabel, 200);
 
 // Expose for quick console debugging during prototype playtests.
 window.__sisyphus = { state, getLiveStats, saveState };

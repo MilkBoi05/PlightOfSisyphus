@@ -23,7 +23,7 @@ Opens at **http://localhost:5188** (or the next free port Vite prints).
 
 | System | Behavior |
 |--------|----------|
-| Grip soft-cap | Distance conversion slows near capacity / late mountain; never reverses |
+| Grip | Higher on the mountain, some of a shove can be wasted; more Grip keeps more Distance |
 | Momentum | Build on click → boost scales 1.0→1.10+; 1.2s buffer then decay |
 | 6 Run Upgrades | Might, Traction, Shades, Grip, Momentum, Profit |
 | Summit | Hades corporate review → Spite → wipe run upgrades |

@@ -18,105 +18,132 @@
         <canvas id="game-canvas" width="960" height="640"></canvas>
 
         <div id="hud">
-          <div class="hud-top">
-            <div class="hud-top-left">
-              <div class="icon-rail" role="toolbar" aria-label="Meta">
-                <button
-                  type="button"
-                  id="btn-settings"
-                  class="icon-btn icon-btn--art"
-                  title="Settings"
-                  aria-label="Settings"
-                >
-                  <img
-                    class="pixel-icon-art"
-                    src="/icon-settings.png?v=2"
-                    width="96"
-                    height="96"
-                    alt=""
-                    draggable="false"
-                  />
-                </button>
-                <button
-                  type="button"
-                  id="btn-stats"
-                  class="icon-btn icon-btn--art"
-                  title="Stats"
-                  aria-label="Stats"
-                >
-                  <img
-                    class="pixel-icon-art"
-                    src="/icon-stats.png"
-                    width="96"
-                    height="96"
-                    alt=""
-                    draggable="false"
-                  />
-                </button>
-              </div>
-              <div id="hud-stats" class="hud-stats" aria-live="polite"></div>
+          <div class="hud-top-left">
+            <div class="icon-rail" role="toolbar" aria-label="Meta">
+              <button
+                type="button"
+                id="btn-settings"
+                class="icon-btn icon-btn--art"
+                title="Settings"
+                aria-label="Settings"
+              >
+                <img
+                  class="pixel-icon-art"
+                  src="/icon-settings.png?v=2"
+                  width="96"
+                  height="96"
+                  alt=""
+                  draggable="false"
+                />
+              </button>
+              <button
+                type="button"
+                id="btn-stats"
+                class="icon-btn icon-btn--art"
+                title="Stats"
+                aria-label="Stats"
+              >
+                <img
+                  class="pixel-icon-art"
+                  src="/icon-stats.png"
+                  width="96"
+                  height="96"
+                  alt=""
+                  draggable="false"
+                />
+              </button>
             </div>
+          </div>
 
-            <div id="hud-center" class="hud-center">
-              <div class="hud-meter-block">
-                <div class="hud-meter-head">
-                  <span class="hud-label">Distance</span>
-                  <span class="hud-value" id="hud-distance">0 / 10K m</span>
-                </div>
-                <div class="meter" aria-hidden="true">
-                  <div class="meter-fill distance" id="hud-distance-bar"></div>
-                </div>
+          <div id="hud-stats" class="hud-stats" aria-live="polite"></div>
+
+          <div id="hud-center" class="hud-center">
+            <div class="hud-meter-block hud-meter-block--distance">
+              <div class="hud-meter-head">
+                <span class="hud-label">Distance</span>
+                <span class="hud-value" id="hud-distance">0 / 100 m</span>
               </div>
-              <div class="hud-meter-block">
-                <div class="hud-meter-head">
-                  <span class="hud-label">Momentum <span id="hud-momentum-pct">0%</span></span>
-                  <span class="hud-sub" id="hud-momentum-status">Idle</span>
-                </div>
-                <div class="meter momentum-meter" aria-hidden="true">
-                  <div class="meter-fill momentum" id="hud-momentum-bar"></div>
-                </div>
+              <div class="meter" aria-hidden="true">
+                <div class="meter-fill distance" id="hud-distance-bar"></div>
               </div>
             </div>
-
-            <div id="hud-currency" class="hud-currency">
-              <div class="hud-currency-item">
-                <span class="hud-label">Defiance</span>
-                <span class="hud-value accent" id="hud-defiance">0</span>
+            <div class="hud-meter-block">
+              <div class="hud-meter-head">
+                <span class="hud-label">Momentum <span id="hud-momentum-pct">0%</span></span>
+                <span class="hud-sub" id="hud-momentum-status">Idle</span>
               </div>
-              <div class="hud-currency-item">
-                <span class="hud-label">Spite</span>
-                <span class="hud-value spite" id="hud-spite">0</span>
+              <div class="meter momentum-meter" aria-hidden="true">
+                <div class="meter-fill momentum" id="hud-momentum-bar"></div>
               </div>
             </div>
           </div>
 
-          <aside id="shop-dock" class="shop-dock" aria-label="Upgrades">
-            <div class="shop-dock-head">
-              <div class="shop-tabs" role="tablist">
-                <button
-                  type="button"
-                  class="shop-tab active"
-                  data-shop="defiance"
-                  role="tab"
-                  aria-selected="true"
-                >
-                  Defiance
-                </button>
-                <button
-                  type="button"
-                  class="shop-tab"
-                  data-shop="spite"
-                  role="tab"
-                  aria-selected="false"
-                >
-                  Spite
-                </button>
-              </div>
-              <p id="shop-blurb" class="shop-blurb">Resets on summit</p>
+          <div class="shop-cluster">
+            <div class="skill-rail">
+            <div class="skill-bar" role="toolbar" aria-label="Active skills">
+              <button type="button" id="btn-prometheus" class="skill-btn" disabled title="Buy Prometheus Fire">
+                <span class="skill-btn-key">Q</span>
+                <span class="skill-btn-name">Fire</span>
+                <span class="skill-btn-cd" id="prometheus-cd"></span>
+              </button>
+              <button type="button" id="btn-daedalus" class="skill-btn" disabled title="Buy Daedalus' Device">
+                <span class="skill-btn-key">F</span>
+                <span class="skill-btn-name">Device</span>
+                <span class="skill-btn-cd" id="daedalus-cd"></span>
+              </button>
             </div>
-            <div id="shop-defiance" class="shop-panel active" role="tabpanel"></div>
-            <div id="shop-spite" class="shop-panel" role="tabpanel" hidden></div>
-          </aside>
+            <p id="skill-status" class="skill-status" hidden aria-live="polite"></p>
+            </div>
+
+            <aside id="shop-dock" class="shop-dock" aria-label="Upgrades">
+              <div class="shop-dock-currency" id="hud-currency">
+                <div class="hud-currency-item">
+                  <span class="hud-label">Defiance</span>
+                  <span class="hud-currency-value">
+                    <span class="hud-value accent" id="hud-defiance">0</span>
+                    <img
+                      class="currency-icon"
+                      src="/icon-defiance.png?v=3"
+                      width="22"
+                      height="22"
+                      alt=""
+                      draggable="false"
+                      aria-hidden="true"
+                    />
+                  </span>
+                </div>
+                <div class="hud-currency-item">
+                  <span class="hud-label">Spite</span>
+                  <span class="hud-value spite" id="hud-spite">0</span>
+                </div>
+              </div>
+              <div class="shop-dock-head">
+                <div class="shop-tabs" role="tablist">
+                  <button
+                    type="button"
+                    class="shop-tab active"
+                    data-shop="defiance"
+                    role="tab"
+                    aria-selected="true"
+                  >
+                    Defiance
+                  </button>
+                  <button
+                    type="button"
+                    class="shop-tab"
+                    data-shop="spite"
+                    role="tab"
+                    aria-selected="false"
+                  >
+                    Spite
+                  </button>
+                </div>
+                <p id="shop-blurb" class="shop-blurb">Resets on summit</p>
+              </div>
+              <div id="shop-defiance" class="shop-panel active" role="tabpanel"></div>
+              <div id="shop-spite" class="shop-panel" role="tabpanel" hidden></div>
+            </aside>
+          </div>
         </div>
 
         <div id="meta-overlay" class="meta-overlay" hidden>
@@ -131,12 +158,45 @@
           </div>
         </div>
 
+        <div id="spite-tree-overlay" class="spite-tree-overlay" hidden>
+          <button type="button" class="spite-tree-backdrop" id="spite-tree-backdrop" aria-label="Close skill tree"></button>
+          <div class="spite-tree-shell" role="dialog" aria-modal="true" aria-label="Spite skill tree">
+            <div class="spite-tree-chip spite-tree-chip--wallet">
+              <div class="spite-tree-wallet">
+                <span class="spite-tree-wallet-label">Spite</span>
+                <strong id="spite-tree-spite">0</strong>
+                <span class="spite-tree-wallet-note">Permanent · survives descent</span>
+              </div>
+              <button type="button" id="spite-tree-close" class="meta-close" aria-label="Close">X</button>
+            </div>
+            <div class="spite-tree-body">
+              <div id="spite-tree-viewport" class="spite-tree-viewport">
+                <div id="spite-tree-world" class="spite-tree-world"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="debug-bar" class="debug-bar">
           <span class="debug-label">DEV</span>
           <button type="button" id="debug-restart">Restart run</button>
           <button type="button" id="debug-hard-reset">Hard reset</button>
-          <button type="button" id="debug-skip-100">+1000m</button>
+          <button type="button" id="debug-skip-100">+100m</button>
           <button type="button" id="debug-summit">Jump to summit</button>
+          <span class="debug-label">Anim</span>
+          <select id="debug-anim-target" class="debug-select" title="Frame stepper target">
+            <option value="both">Both anims</option>
+            <option value="sisy">Sisy only</option>
+            <option value="boulder">Boulder only</option>
+          </select>
+          <button type="button" id="debug-anim-prev" title="Previous frame">◀</button>
+          <span id="debug-anim-frame" class="debug-frame-label">auto</span>
+          <button type="button" id="debug-anim-next" title="Next frame">▶</button>
+          <button type="button" id="debug-anim-play" title="Resume animation">Play</button>
+          <span class="debug-label">Speed</span>
+          <button type="button" id="debug-anim-slower" title="Slower anim">−</button>
+          <span id="debug-anim-speed" class="debug-frame-label">1×</span>
+          <button type="button" id="debug-anim-faster" title="Faster anim">+</button>
         </div>
 
         <div id="summit-overlay" class="overlay" hidden>
